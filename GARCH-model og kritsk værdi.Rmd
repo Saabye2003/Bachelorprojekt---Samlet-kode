@@ -1,0 +1,535 @@
+---
+title: "Bachelor - Designstudie analyse"
+output: html_document
+date: "2026-04-17"
+---
+# Dette dokument bruger tidligere funktioner til at estimere garch-modellerne, samt beregne om de er estimeret korrekt
+# Afslutningsvis beregnes kritisk værdi for teststørrelserne
+# Garch-modellerne vurderes på både trænings- og testdata
+# bruges faktisk også til at give parameterværdier til dokument 4
+# Er det 5. dokument i rækken
+
+# Starter med at indhente data fra SP500
+```{r}
+# henter pakker der ikke tidligere er brugt, bl.a. rugarch der bruges til estimering af model
+library(quantmod)
+library(rugarch)
+set.seed(2)
+
+# Henter SP500 fra 1. januar 2020-2025
+start_date <- as.Date("2020-01-01")
+end_date   <- as.Date("2025-12-31")
+
+getSymbols("^GSPC", src = "yahoo", from = start_date, to = end_date)
+
+# Klargører datasæt m dato og procentafkast
+sp500_data <- data.frame(
+  date = index(GSPC),
+  price = as.numeric(Cl(GSPC))
+)
+
+# Beregner dagligt procentafkast
+sp500_data <- sp500_data %>%
+  mutate(change = (price / lag(price) - 1) * 100)
+
+# Fjern obs med NA (uden info)
+sp500_data <- na.omit(sp500_data)
+
+
+# Laver figur over udvikling og afkast i procent
+
+# pdf("~/Desktop/sp500_plot.pdf", width = 8, height = 6)
+
+par(mar = c(5, 5, 4, 5.1))
+
+# Plot S&P500 pris (venstre akse)
+plot(sp500_data$date, sp500_data$price,
+     type = "l",
+     col = "black",
+     lwd = 1.5,
+     xlab = "dato",
+     ylab = "lukkepris (USD)",
+     main = "S&P500 lukkepris og daglige afkast")
+
+par(new = TRUE)
+
+# Plot S&P500 afkast i procent (højre akse)
+plot(sp500_data$date, sp500_data$change,
+     type = "l",
+     col = "red",
+     lwd = 0.6,
+     axes = FALSE,
+     xlab = "",
+     ylab = "")
+
+axis(side = 4)
+mtext("daglige afkast (%)", side = 4, line = 3)
+# dev.off()
+```
+
+```{r}
+# Begynder kode til at opdele data, og estimere model.
+# Dette skal gøres for både høj og lav volatil model
+
+# Konverterer til procent
+returns_xts <- xts(sp500_data$change/100, order.by = sp500_data$date)
+
+# definerer perioder
+train_data <- returns_xts["2020-01-01/2024-12-31"]
+test_data <- returns_xts["2025-01-01/2025-12-31"]
+
+# estimerer Garch(1,1)-model
+spec <- ugarchspec(
+  variance.model = list(garchOrder = c(1,1)),
+  mean.model = list(armaOrder = c(0,0)),  
+  distribution.model = "std"              
+)
+
+# Fitter model
+fit <- ugarchfit(spec = spec, data = train_data)
+fit
+
+params <- coef(fit)
+params
+
+summary(fit)
+fit@fit$matcoef
+
+# Gemmer model til senere brug
+h0_par <- list(
+  omega  = as.numeric(coef(fit)["omega"]),
+  alpha1 = as.numeric(coef(fit)["alpha1"]),
+  beta1  = as.numeric(coef(fit)["beta1"]),
+  nu     = as.numeric(coef(fit)["shape"])
+)
+```
+
+```{r}
+# Histogram hvor der sammenlignes observerede afkast og simuleret tæthed for Garch(1,1)-model
+
+# Simulering af model
+obs <- as.numeric(train_data)
+set.seed(2)
+sim <- simulate_garch_matrix(
+  n      = 100000,
+  omega  = h0_par$omega,
+  alpha1 = h0_par$alpha1,
+  beta1  = h0_par$beta1,
+  nu     = h0_par$nu,
+  burn_in = 500,
+  M      = 1
+)
+sim_path <- as.numeric(sim$X)
+
+obs_plot <- obs * 100
+sim_plot <- sim_path * 100
+
+# Laver plot med afkast, både histogram og 'tæthedskurver'
+
+# pdf("~/Desktop/Histogram_vs_simuleret-Garch(1,1)_2.pdf", width = 8, height = 6)
+
+hist(obs_plot,
+     probability = TRUE,
+     breaks = 50,
+     col = adjustcolor("grey", alpha.f = 1),
+     border = "white",
+     main = "S&P 500 observerede afkast vs GARCH(1,1) simuleret tæthed",
+     xlab = "dagligt afkast (%)",
+     ylab = "tæthed",
+     xlim = c(-10, 10),
+     ylim = c(0,0.5))
+
+lines(density(sim_plot), col = "red", lwd = 2)
+lines(density(obs_plot), col = "blue", lwd = 2, lty = 2)
+
+legend("topright",
+       legend = c("Observeret (empirisk)", "GARCH(1,1) simuleret"),
+       col    = c("blue", "red"),
+       lty    = c(2, 1),
+       lwd    = 2,
+       bty    = "n")
+# dev.off()
+```
+
+```{r}
+# koden her tester modellerne vs træningsdata om VaR/Risiko matcher korrekt
+alpha <- 0.975
+
+sigma <- sigma(fit)          
+mu <- fitted(fit)            
+
+# Student t parameter
+shape <- coef(fit)["shape"]
+
+# VaR for Student-t
+q_t <- qt(1 - alpha, df = shape)
+VaR <- mu + sigma * q_t * sqrt((shape - 2)/shape)
+returns <- as.numeric(train_data)
+
+# tjekker antal overskridelser, bruges til Kupiec-test
+violations <- returns < VaR
+violation_rate <- mean(violations)
+expected_rate <- 1 - alpha
+
+# printer resultater umiddelbart
+cat("Observeret VaR overskridelsesrate:", violation_rate, "\n")
+cat("Forventet rate:", expected_rate, "\n")
+
+# Tjekker om fundet er statistisk signifikant med en Kupiec-test, funktionen bruges også senere
+kupiec_test <- function(violations, alpha) {
+
+  n <- length(violations)
+  x <- sum(violations)
+
+  pi_hat <- x / n
+  pi <- 1 - alpha
+
+  LR <- -2 * (
+    log((1 - pi)^(n - x) * pi^x) -
+    log((1 - pi_hat)^(n - x) * pi_hat^x)
+  )
+
+  p_value <- 1 - pchisq(LR, df = 1)
+
+  return(list(
+    LR_statistic = LR,
+    p_value = p_value,
+    violations = x,
+    rate = pi_hat
+  ))
+}
+
+# printer resultater fra Kupiec-test
+results <- kupiec_test(violations, alpha)
+results
+```
+
+```{r}
+# Denne kode bruges egentlig til at plotte samme resultatet som i forrige kode, altså VaR vs afkast
+
+# In-sample betinget volatilitet og middelværdi
+sigma_dyn <- as.numeric(sigma(fit))
+mu_dyn    <- as.numeric(fitted(fit))
+
+# Beregner VaR
+q_var <- qt(1 - alpha, df = shape)
+VaR_dyn <- mu_dyn + sigma_dyn * q_var * sqrt((shape - 2)/shape)
+
+# Beregner ES
+p_tail    <- 1 - alpha
+t_pdf <- dt(q_var, df=shape)
+ES_faktor <- (t_pdf / p_tail) * (shape + q_var^2) / (shape - 1)
+ES_dyn    <- mu_dyn - sigma_dyn * ES_faktor * sqrt((shape - 2)/shape)
+
+# Data til plot — x-akse som dagnummer (som referencebilledet)
+returns_train <- as.numeric(train_data)
+n             <- length(returns_train)
+
+df_plot <- data.frame(
+  dag       = 1:n,
+  afkast    = returns_train,
+  VaR       = VaR_dyn,
+  ES        = ES_dyn
+)
+
+# Overskridelser, steder hvor afkast falder under VaR
+df_plot$overskridelse <- df_plot$afkast < df_plot$VaR
+
+# plotter nu resultater
+afkast_vs_var <- ggplot(df_plot, aes(x = dag)) +
+  geom_line(aes(y = afkast,  colour = "afkast"),    linewidth = 0.4) +
+  geom_line(aes(y = VaR,     colour = "VaR (97.5%)"), linewidth = 0.7) +
+  geom_line(aes(y = ES,      colour = "ES (97.5%)"),  linewidth = 0.7) +
+  geom_point(data = subset(df_plot, overskridelse),
+             aes(x = dag, y = afkast, colour = "overskridelser af VaR"),
+             size = 1.8) +
+  scale_colour_manual(
+    values = c("afkast"      = "blue",
+               "VaR (97.5%)"  = "red",
+               "ES (97.5%)"   = "green3",
+               "overskridelser af VaR" = "black"),
+    breaks = c("afkast", "VaR (97.5%)", "ES (97.5%)", "overskridelser af VaR")
+  ) +
+  labs(
+    title = "træningsdata afkast, med VaR, og ES fra estimeret GARCH(1,1)-model",
+    x     = "dage",
+    y     = "afkast"
+  ) +
+  theme_bw() +
+  labs(colour = NULL) + 
+  theme(
+    legend.position  = "right",
+    legend.title     = element_text(size = 10),
+    plot.title       = element_text(hjust = 0.5, size = 13)
+  )
+afkast_vs_var
+# ggsave("~/Desktop/afkast_vs_var.pdf", plot = afkast_vs_var, width = 10, height = 6)
+```
+
+```{r}
+# Udfører simpel Ljung-Box-test for modeller på træningsdata
+res <- residuals(fit, standardize = TRUE)
+Box.test(res, lag = 21, type = "Ljung-Box")
+Box.test(res^2, lag = 21, type = "Ljung-Box")
+```
+
+```{r}
+# Begynder nu analyse af modeller på testdata, samler analyse i en streng, men samme metoder som før
+
+# Gemmer parametre fra model
+spec_fixed <- getspec(fit)
+setfixed(spec_fixed) <- as.list(coef(fit))
+
+# Fitter model
+filt_full <- ugarchfilter(spec_fixed, data = c(train_data, test_data))
+n_train  <- length(train_data)
+n_test   <- length(test_data)
+idx_test <- (n_train + 1):(n_train + n_test)
+
+sigma_dyn <- as.numeric(sigma(filt_full))[idx_test]
+mu_dyn    <- as.numeric(fitted(filt_full))[idx_test]
+
+# Ljung-Box test
+res_full <- residuals(filt_full, standardize = TRUE)
+res_test <- res_full[idx_test]
+Box.test(res_test,    lag = 21, type = "Ljung-Box")
+Box.test(res_test^2,  lag = 21, type = "Ljung-Box")
+
+# Definerer VaR og ES på samme måde som tidligere
+q_var <- qt(1 - alpha, df = shape)
+t_pdf <- dt(q_var, df=shape)
+ES_faktor <- (t_pdf / (1 - alpha)) * (shape + q_var^2) / (shape - 1)
+VaR_dyn   <- mu_dyn + sigma_dyn * q_var * sqrt((shape - 2)/shape)
+ES_dyn    <- mu_dyn - sigma_dyn * ES_faktor * sqrt((shape - 2)/shape)
+
+# Udfører Kupiec-test igen, giver p-værdi for antallet af overskridelser
+returns_test <- as.numeric(test_data)
+
+violations <- returns_test < VaR_dyn
+
+violation_rate <- mean(violations)
+expected_rate <- 1 - alpha
+
+# printer tal på forventet vs overskridelsesrate
+cat("Observeret VaR overskridelsesrate:", violation_rate, "\n")
+cat("Forventet rate:", expected_rate, "\n")
+
+# resultater fra Kupiec, bruger funktion fra tidligere, derfor en del mere simpelt
+results <- kupiec_test(violations, alpha)
+results
+
+
+# Laver kode til samme plot som tidligere, med afkast vs VaR/ES
+df_plot <- data.frame(
+  dag = 1:n_test,
+  afkast = returns_test,
+  VaR = VaR_dyn,
+  ES = ES_dyn
+)
+
+df_plot$overskridelse <- df_plot$afkast < df_plot$VaR
+
+# laver plot
+afkast_vs_var2 <- ggplot(df_plot, aes(x = dag)) +
+  geom_line(aes(y = afkast, colour = "afkast"), linewidth = 0.4) +
+  geom_line(aes(y = VaR, colour = "VaR (97.5%)"), linewidth = 0.7) +
+  geom_line(aes(y = ES, colour = "ES (97.5%)"), linewidth = 0.7) +
+  geom_point(
+    data = subset(df_plot, overskridelse),
+    aes(x = dag, y = afkast, colour = "overskridelser af VaR"),
+    size = 1.8
+  ) +
+  scale_colour_manual(
+    name=NULL,
+    values = c(
+      "afkast" = "blue",
+      "VaR (97.5%)" = "red",
+      "ES (97.5%)" = "green3",
+      "overskridelser af VaR" = "black"
+    ),
+    breaks = c("afkast", "VaR (97.5%)", "ES (97.5%)", "overskridelser af VaR")
+  ) +
+  labs(
+    title = "testdata afkast, med VaR og ES fra estimeret GARCH(1,1)-model",
+    x = "dage",
+    y = "afkast"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5, size = 13)
+  )
+
+# printer og gemmer
+afkast_vs_var2
+
+# ggsave("~/Desktop/afkast_vs_var_test_høj.pdf", plot = afkast_vs_var2, width = 10, height = 6)
+
+```
+
+```{r}
+# Sammenligning af simulerede vs observerede afkast på testdata
+
+# Simulering til tæthedssammenligning, genbruger funktion fra tidligere
+sim_dist_returns <- as.numeric(sim$X)
+
+# --- Tæthedsplot: lang simulering vs observerede testafkast ---
+df_hist <- data.frame(
+  afkast = c(sim_dist_returns, as.numeric(test_data)) * 100,
+  type   = factor(c(
+    rep("Simuleret GARCH",   length(sim_dist_returns)),
+    rep("Observeret afkast", length(test_data))
+  ))
+)
+
+# laver plot
+test_obs_afkast_høj <- ggplot() +
+  geom_histogram(
+    data = subset(df_hist, type == "Observeret afkast"),
+    aes(x = afkast, y = after_stat(density)),
+    bins = 120,
+    fill = "grey80",
+    colour = "grey50",
+    alpha = 0.7
+  ) +
+  geom_density(
+    data = df_hist,
+    aes(x = afkast, colour = type, linetype = type),
+    linewidth = 1
+  ) +
+  scale_colour_manual(
+    values = c(
+      "Simuleret GARCH"   = "red",
+      "Observeret afkast" = "blue"
+    )
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "Simuleret GARCH"   = "solid",
+      "Observeret afkast" = "dashed"
+    )
+  ) +
+  coord_cartesian(xlim = c(-10, 10)) +
+  labs(
+    title    = "S&P 500 observerede afkast vs GARCH(1,1) simuleret tæthed",
+    x        = "dagligt afkast",
+    y        = "tæthed",
+    colour   = NULL,
+    linetype = NULL
+  ) +
+  theme_bw()
+test_obs_afkast_høj
+
+# ggsave("~/Desktop/obs_afkast_test_høj.pdf", plot = test_obs_afkast_høj, width = 8, height = 6)
+
+```
+
+```{r}
+# Udregner nu de kritiske værdier, der bruges til at sammenligne model og faktisk afkast, bliver senere plottet
+
+# Monte Carlo-simulering af model under H0, trækker på funktion fra tidligere dokument
+stats_H0 <- compute_stats_bundle(
+  true_par  = h0_par,
+  model_par = h0_par,
+  n         = n_test,
+  M         = 10000,
+  burn_in   = 500,
+  alpha_es  = 1 - alpha,
+  alpha_var = 0.01,
+  seed      = 2026
+)
+
+# Empiriske teststørrelser
+X_emp   <- as.numeric(returns_test) - as.numeric(mu_dyn)
+VaR_emp <- as.numeric(-sigma_dyn * q_var) * sqrt((shape - 2)/shape)
+ES_emp  <- as.numeric( sigma_dyn * sqrt((shape - 2)/shape) *
+                       (shape + q_var^2) / (shape - 1) *
+                       (dt(q_var, df = shape) / (1 - alpha)))
+
+X_emp_mat     <- matrix(X_emp,                 nrow = 1)
+sigma_emp_mat <- matrix(as.numeric(sigma_dyn), nrow = 1)
+VaR_emp_mat   <- matrix(VaR_emp,               nrow = 1)
+ES_emp_mat    <- matrix(ES_emp,                nrow = 1)
+
+# trækker på teststørrelser defineret i forrige dokument
+emp_stats <- list(
+  Z1 = as.numeric(acerbi_Z1_td(X_emp_mat, VaR_emp_mat, ES_emp_mat)),
+  Z2 = as.numeric(acerbi_Z2_td(X_emp_mat, VaR_emp_mat, ES_emp_mat, alpha = 1 - alpha)),
+  ER = as.numeric(compute_ER_td(X_emp_mat, VaR_emp_mat, ES_emp_mat)),
+  CC = as.numeric(compute_CC_td(X_emp_mat, VaR_emp_mat, ES_emp_mat,
+                                sigma_emp_mat, 1 - alpha)$stat)
+)
+
+# Kritiske værdier
+H0_dist <- list(Z1 = stats_H0$Z1, Z2 = stats_H0$Z2,
+                ER = stats_H0$ER, CC = stats_H0$CC_stat)
+crit_values <- sapply(H0_dist, function(v) as.numeric(quantile(v, probs = 0.05, na.rm = TRUE)))
+
+# tabel med værdier
+result_table <- data.frame(
+  test       = names(emp_stats),
+  empirisk   = round(sapply(emp_stats, as.numeric), 4),
+  kritisk    = round(as.numeric(crit_values), 4),
+  forkast_H0 = sapply(emp_stats, as.numeric) < as.numeric(crit_values)
+)
+print(result_table)
+```
+
+
+```{r}
+# Har nu udregnet teststørrelser og kritisk værdi, denne kode bruges til at vise visuelt
+
+# Denne funktion bruges til at plotte for samtlige teststørrelser
+plot_h0_density <- function(h0_values, emp_val, crit_val, test_name,
+                            emp_colour = "purple") {
+  h0_values <- h0_values[is.finite(h0_values)]
+  qs <- quantile(h0_values, probs = c(0.005, 0.995))
+  d  <- data.frame(value = h0_values[h0_values >= qs[1] & h0_values <= qs[2]])
+  
+  crit_label <- paste0("Kritisk værdi 5% for ", test_name, " ved GARCH(1,1)")
+  emp_label  <- paste0(test_name, " testværdi med empirisk data")
+  
+  df_lines <- data.frame(
+    xintercept = c(crit_val, emp_val),
+    type       = factor(c(crit_label, emp_label),
+                        levels = c(crit_label, emp_label))
+  )
+# plot
+  ggplot(d, aes(x = value)) +
+    geom_density(colour = "black", linewidth = 0.8) +
+    geom_vline(data = df_lines,
+               aes(xintercept = xintercept, colour = type, linetype = type),
+               linewidth = 0.7, key_glyph = "path") +
+    scale_colour_manual(
+      name = NULL,
+      values = setNames(c("black", emp_colour), c(crit_label, emp_label))
+    ) +
+    scale_linetype_manual(
+      name = NULL,
+      values = setNames(c("dashed", "solid"), c(crit_label, emp_label))
+    ) +
+    labs(
+      title = paste0("Sammenligning af kritisk værdi og empirisk testværdi for ", test_name),
+      x = "værdi", y = "tæthed") +
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      legend.text     = element_text(size = 8),
+      plot.title      = element_text(size = 10, hjust = 0.5)
+    )
+}
+
+# Bruger hjælpefunktionen til at lave de fire plots
+p_Z1_low <- plot_h0_density(stats_H0$Z1,      emp_stats$Z1, crit_values["Z1"], "Z1", "purple")
+p_Z2_low <- plot_h0_density(stats_H0$Z2,      emp_stats$Z2, crit_values["Z2"], "Z2", "purple")
+p_ER_low <- plot_h0_density(stats_H0$ER,      emp_stats$ER, crit_values["ER"], "ER", "red")
+p_CC_low <- plot_h0_density(stats_H0$CC_stat, emp_stats$CC, crit_values["CC"], "CC", "red")
+
+# gemmer plots
+
+# ggsave("~/Desktop/tæthed_kritisk_Z1_test_lav.pdf", plot = p_Z1_low, width = 8, height = 6)
+# ggsave("~/Desktop/tæthed_kritisk_Z2_test_lav.pdf", plot = p_Z2_low, width = 8, height = 6)
+# ggsave("~/Desktop/tæthed_kritisk_ER_test_lav.pdf", plot = p_ER_low, width = 8, height = 6)
+# ggsave("~/Desktop/tæthed_kritisk_CC_test_lav.pdf", plot = p_CC_low, width = 8, height = 6)
+```

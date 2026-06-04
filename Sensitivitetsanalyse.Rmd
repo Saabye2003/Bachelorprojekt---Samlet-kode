@@ -1,0 +1,771 @@
+---
+title: "Bachelor - Sensitivitetsanalyse"
+output: html_document
+date: "2026-03-31"
+---
+
+# Dette dokument er koden bag sensitivitetsanalysen, sammen med de dertilhørende tæthedsplots.
+# Er det 4. dokument i rækken
+
+
+# Hele denne chunk køres inden sensitivitetsanalysen, definerer funktioner bagved
+```{r}
+# simulerer en student t-fordeling
+rt_std <- function(n, nu) {
+  if (nu <= 2) stop("kræver nu > 2")
+  rt(n, df = nu) * sqrt((nu - 2) / nu)
+}
+
+# simulerer matrix med afkast (X) og volatilitet (sigma)
+simulate_garch_matrix <- function(n, omega, alpha1, beta1, nu,
+                                  burn_in = 500, M = 10000,
+                                  seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  if (alpha1 + beta1 >= 1) stop("kræver alpha+beta < 1")
+  if (omega <= 0) stop("kræver omega > 0")
+  if (alpha1 < 0 || beta1 < 0) stop("kræver alpha, beta >= 0")
+
+  Tt <- n + burn_in
+  X  <- matrix(0, M, Tt)
+  h  <- matrix(NA_real_, M, Tt)
+  h0 <- omega / (1 - alpha1 - beta1)
+  h[, 1] <- h0
+
+  for (m in seq_len(M)) {
+    z <- rt_std(Tt, nu)
+    X[m, 1] <- sqrt(h0) * z[1]
+    for (t in 2:Tt) {
+      h[m, t] <- omega + alpha1 * X[m, t - 1]^2 + beta1 * h[m, t - 1]
+      X[m, t] <- sqrt(h[m, t]) * z[t]
+    }
+  }
+
+  idx <- (burn_in + 1):(burn_in + n)
+  list(X = X[, idx, drop = FALSE], sigma = sqrt(h[, idx, drop = FALSE]))
+}
+
+# tager allerede simuleret afkast og genberegner volatilitet under andre GARCH-parametre
+simulate_garch_sigma <- function(X, sigma2_start, omega, alpha1, beta1) {
+  X <- as.matrix(X)
+  M <- nrow(X); n <- ncol(X)
+  if (length(sigma2_start) == 1) sigma2_start <- rep(sigma2_start, M)
+  sigma2 <- matrix(NA_real_, M, n)
+  sigma  <- matrix(NA_real_, M, n)
+  sigma2[, 1] <- sigma2_start
+  sigma[, 1]  <- sqrt(sigma2_start)
+  for (t in 2:n) {
+    sigma2[, t] <- omega + alpha1 * X[, t - 1]^2 + beta1 * sigma2[, t - 1]
+    sigma[, t]  <- sqrt(sigma2[, t])
+  }
+  list(X = X[, -1, drop = FALSE], sigma = sigma[, -1, drop = FALSE])
+}
+```
+
+```{r}
+# Definerer her teststørrelser der bruges i sensitivitetsanalyse, lidt gentagelse af teststørrelser fra Acerbi i teststatistikker
+# men fint at have defineret dem alle samlet her, som bruges i dette dokument
+
+# Definerer Z1 fra Acerbi på samme måde som i dokumentet teststatistikker, men med nye navne
+acerbi_Z1_td <- function(X, VaR_t, ES_t) {
+  I  <- X < -VaR_t
+  Nt <- rowSums(I)
+  Z1 <- rowSums(X * I / ES_t) / Nt + 1
+  Z1[Nt == 0] <- NA_real_
+  na.omit(Z1)
+}
+
+# Definerer Z2 fra Acerbi på samme måde som i dokumentet teststatistikker, men med nye navne
+acerbi_Z2_td <- function(X, VaR_t, ES_t, alpha) {
+  n_eff <- ncol(X)
+  I     <- X < -VaR_t
+  rowSums(X * I / ES_t) / (n_eff * alpha) + 1
+}
+
+# Definerer Z3 fra Acerbi, adskiller sig mere fra dokumentet teststatistikker pga brugen i dette dokument
+acerbi_Z3_td <- function(X, sigma_forecast, df_H0, alpha) {
+# beregner empirisk ES
+  emp_ES <- function(Y, alpha) {
+    cap      <- floor(nrow(Y) * alpha)
+    sorted_Y <- apply(Y, 2, sort)
+    -colMeans(sorted_Y[1:cap, , drop = FALSE])
+  }
+# beregner kvantiler
+  student_quantile <- function(x, sigma, nu) {
+    qx <- qt(x, nu) * sqrt((nu - 2) / nu)
+    outer(qx, sigma, `*`)
+  }
+# beregner forventet ES under H0
+  exp_ES_coef <- function(n, alpha, nu) {
+    cap <- floor(n * alpha)
+    integrand_base <- function(p) {
+      weight <- pbeta(1 - p, n - cap, cap)
+      qt(p, df = nu) * sqrt((nu - 2) / nu) * weight
+    }
+    int <- integrate(integrand_base, lower = 0, upper = 1)
+    -n / cap * int$value
+  }
+# skalerer forventet ES med sigma
+  exp_ES <- function(n, alpha, sigma, nu) {
+    sigma * exp_ES_coef(n, alpha, nu)
+  }
+# selve Z3 teststørrelse for én periode
+  Z3_stat <- function(X, sigma, alpha, nu) {
+    n        <- length(X)
+    U        <- pt(X / sigma * sqrt(nu / (nu - 2)), df = nu)
+    P_inv_U  <- student_quantile(U, sigma, nu)
+    ES_hat   <- emp_ES(P_inv_U, alpha)
+    EVES_den <- exp_ES(n, alpha, sigma, nu)
+    -mean(ES_hat / EVES_den) + 1
+  }
+# en løkke der binder det hele
+  vapply(seq_len(nrow(sigma_forecast)), function(i) {
+    Z3_stat(X[i, ], sigma_forecast[i, ], alpha, df_H0)
+  }, numeric(1))
+}
+
+# Definerer ER (Exceedance Residuals) fra McNeil og Frey (2000)
+compute_ER_td <- function(X, VaR_t, ES_t) {
+  I  <- X < -VaR_t
+  er_mat <- ifelse(I, X + ES_t, NA_real_)
+  er_val <- rowMeans(er_mat, na.rm = TRUE)
+  er_val[is.nan(er_val)] <- NA_real_
+  na.omit(er_val)
+}
+
+# Definerer General CC (Conditional Calibration) fra Nolde og Ziegel (2017)
+
+# definerer identifikationsfunktionen
+V_VaR_ES <- function(x, r1, r2, alpha) {
+  exc <- as.numeric(x <= -r1)                        
+  V1  <- exc - alpha                                 # Frekvens (fortegn vendt)
+  V2  <- (r1 - r2) - (1 / alpha) * exc * (x + r1)    # Størrelse (fortegn beholdt)
+  cbind(V1, V2)
+}
+
+# Bygger matrix med de fire testfunktioner
+build_Zt <- function(V_mat, r1_vec, sigma_vec) {
+  Z      <- matrix(NA_real_, nrow = nrow(V_mat), ncol = 4)
+  Z[, 1] <- V_mat[, 1]
+  Z[, 2] <- abs(r1_vec) * V_mat[, 1]
+  Z[, 3] <- V_mat[, 2]
+  Z[, 4] <- (1 / sigma_vec) * V_mat[, 2]
+  Z
+}
+
+# udfører T2-testen for én bane og bruger Hommel-korrektion/procedure
+CC_test_single <- function(x_row, r1_row, r2_row, sigma_row, alpha) {
+  n      <- length(x_row)
+  V      <- V_VaR_ES(x_row, r1_row, r2_row, alpha)
+  Z      <- build_Zt(V, r1_row, sigma_row)
+  Z_bar  <- colMeans(Z)
+  Omega  <- t(Z) %*% Z / n + diag(1e-10, 4)
+  T2_vec <- sqrt(n) * Z_bar / sqrt(diag(Omega))
+
+  pi_m     <- 1 - pnorm(T2_vec)
+  k        <- length(pi_m)
+  C_k      <- sum(1 / seq_len(k))
+  pi_sort  <- sort(pi_m)
+  pi_tilde <- min(k * C_k * pi_sort / seq_len(k))           
+
+  c(pval = pi_tilde, stat = -max(T2_vec))
+}
+
+# Bruger CC_test_single i en hel serie (den endelige), til senere defineres både en pval og stat
+compute_CC_td <- function(X, VaR_t, ES_t, sigma_t, alpha) {
+  out <- vapply(seq_len(nrow(X)), function(i) {
+    CC_test_single(X[i, ], VaR_t[i, ], ES_t[i, ], sigma_t[i, ], alpha)
+  }, FUN.VALUE = c(pval = 0, stat = 0))
+  list(pval = out["pval", ], stat = out["stat", ])
+}
+```
+
+```{r}
+# Definerer her funktioner der simulerer ud fra de allerede definerede funktioner
+
+# Simulerer M baner, beregner VaR og ES og over alle teststørrelser
+compute_stats_bundle <- function(true_par, model_par, n = 250, M = 5000,
+                                    burn_in = 500, alpha_es = 0.025,
+                                    alpha_var = 0.01, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+# henter funktion fra tidligere
+  sim <- simulate_garch_matrix(
+    n      = n + 1,
+    omega  = true_par$omega,
+    alpha1 = true_par$alpha1,
+    beta1  = true_par$beta1,
+    nu     = true_par$nu,
+    burn_in = burn_in - 1,
+    M      = M
+  )
+
+  sigma2_start <- sim$sigma[, 1]^2
+  sim_model    <- simulate_garch_sigma(
+    X            = sim$X,
+    sigma2_start = sigma2_start,
+    omega        = model_par$omega,
+    alpha1       = model_par$alpha1,
+    beta1        = model_par$beta1
+  )
+
+  X_eval     <- sim_model$X
+  sigma_eval <- sim_model$sigma
+
+# funktioner/definitioner for VaR og ES
+  VaR_t <- -sigma_eval * qt(alpha_es, df = model_par$nu) *
+             sqrt((model_par$nu - 2) / model_par$nu)
+  ES_t  <-  sigma_eval * sqrt((model_par$nu - 2) / model_par$nu) *
+             (model_par$nu + qt(alpha_es, df = model_par$nu)^2) /
+             (model_par$nu - 1) *
+             (dt(qt(alpha_es, df = model_par$nu), df = model_par$nu) / alpha_es)
+# VaR-overskridelser
+  q_left_1 <- qt(alpha_var, df = model_par$nu) *
+               sqrt((model_par$nu - 2) / model_par$nu)
+  VaR_1_t  <- sigma_eval * abs(q_left_1)
+  VaR_exc  <- rowSums(X_eval < -VaR_1_t)
+# teststørrelser for backtest
+  Z1_val  <- acerbi_Z1_td(X_eval, VaR_t, ES_t)
+  Z2_val  <- acerbi_Z2_td(X_eval, VaR_t, ES_t, alpha = alpha_es)
+  Z3_val  <- acerbi_Z3_td(X_eval, sigma_eval, model_par$nu, alpha_es)
+  ER_val  <- compute_ER_td(X_eval, VaR_t, ES_t)
+  CC_val  <- compute_CC_td(X_eval, VaR_t, ES_t, sigma_eval, alpha_es)
+  
+# definerer CC på to måder, én af dem bruges til power, den anden til kritisk værdi/tæthedsfordeling
+  list(
+    VaR_exc  = VaR_exc,
+    Z1       = Z1_val,
+    Z2       = Z2_val,
+    Z3       = Z3_val,
+    ER       = ER_val,
+    CC_pval  = CC_val$pval,
+    CC_stat  = CC_val$stat,
+    n_eff    = ncol(X_eval)
+  )
+}
+
+# beregner power for hver test for H0 mod H1
+estimate_power_bundle <- function(stats_H0, stats_H1, sig_target = 0.05,
+                                  p_var = 0.01) {
+  n_eff        <- stats_H0$n_eff
+  q_count_crit <- qbinom(1 - sig_target, size = n_eff, prob = p_var)
+  alpha_crit   <- pbinom(q_count_crit, size = n_eff, prob = p_var,
+                         lower.tail = FALSE)
+
+  p_VaR <- mean(stats_H1$VaR_exc > q_count_crit)
+# funktion til at udregne power
+  lower_tail_power <- function(x0, x1, alpha_level) {
+    x0 <- x0[is.finite(x0)]; x1 <- x1[is.finite(x1)]
+    q  <- unname(quantile(x0, probs = alpha_level, na.rm = TRUE))
+    mean(x1 < q, na.rm = TRUE)
+  }
+# power for hver teststørrelse
+  c(
+    VaR  = p_VaR,
+    Z1   = lower_tail_power(stats_H0$Z1, stats_H1$Z1, alpha_crit),
+    Z2   = lower_tail_power(stats_H0$Z2, stats_H1$Z2, alpha_crit),
+    Z3   = lower_tail_power(stats_H0$Z3, stats_H1$Z3, alpha_crit),
+    ER   = lower_tail_power(stats_H0$ER, stats_H1$ER,  alpha_crit),
+    CC   = lower_tail_power(stats_H0$CC_pval, stats_H1$CC_pval, alpha_crit)
+  )
+}
+
+# Beregner H0-'bundle' én gang, og beregner herefter power for H1 gennem "scenario_H1"
+sens_power <- function(h0_par, scenario_H1, build_true_par,
+                                  n = 250, M = 10000, burn_in = 500,
+                                  alpha_es = 0.025, alpha_var = 0.01,
+                                  seed = 2026) {
+# simulerer under H0  
+  stats_H0 <- compute_stats_bundle(
+    true_par = h0_par, model_par = h0_par,
+    n = n, M = M, burn_in = burn_in,
+    alpha_es = alpha_es, alpha_var = alpha_var,
+    seed=seed
+  )
+  
+  power_mat <- t(vapply(seq_len(nrow(scenario_H1)), function(i) {
+    true_par_i <- build_true_par(scenario_H1[i, , drop = FALSE])
+# simulerer under H1, sørger for forskellig seed i de interne simuleringer af parametre
+    stats_H1_i <- compute_stats_bundle(
+      true_par = true_par_i, model_par = h0_par,
+      n = n, M = M, burn_in = burn_in,
+      alpha_es = alpha_es, alpha_var = alpha_var,
+      seed=seed+i
+    )
+# sammenligner H0 og H1    
+    estimate_power_bundle(stats_H0, stats_H1_i,
+                          sig_target = 0.05, p_var = alpha_var)
+  }, FUN.VALUE = c(VaR = 0, Z1 = 0, Z2 = 0, Z3 = 0, ER = 0, CC = 0)))
+
+  cbind(scenario_H1, as.data.frame(power_mat))
+}
+
+# Hjælpefunktion til at omforme 'power'-tabellen fra bredt til langt
+long_power <- function(df, x_name) {
+  tests <- c("VaR", "Z1", "Z2", "Z3", "ER", "CC")
+  keep  <- c(x_name, tests)
+  long  <- reshape(
+    df[, keep],
+    varying   = tests,
+    v.names   = "power",
+    timevar   = "test",
+    times     = tests,
+    direction = "long"
+  )
+  long[[x_name]] <- as.numeric(long[[x_name]])
+  rownames(long) <- NULL
+  long
+}
+```
+
+# Nu defineres H0-parametre, samt andre værdier der anvendes
+```{r}
+# H0-parametre for høj volatilitet, skal ændres manuelt når det er lav volatilitet
+# får faktisk værdier fra næste dokument "GARCH-model"
+h0_par <- list(
+  omega  = 0.000003693743,
+  alpha1 = 0.1520591,
+  beta1  = 0.8295477,
+  nu     = 7.090743
+)
+
+# Andre værdier der anvendes
+n_sens <- 250; M_sens <- 10000; burn_in_sens <- 500
+alpha_es_sens <- 0.025; alpha_var_sens <- 0.01
+
+omega_factor <- seq(0.2, 10, by = 1)
+arch_values <- c(0.01, 0.05, 0.10, 0.20, 0.50, 0.75)
+d <- c(0.6,0.7,0.8,0.9,1,1.01,1.015,1.019)
+nu_alt <- c(3,4,5,7.090743,10,12,15)
+
+n_eff_sens       <- n_sens
+q_count_crit_sens <- qbinom(1 - 0.05, size = n_eff_sens, prob = alpha_var_sens)
+alpha_crit_sens  <- pbinom(q_count_crit_sens, size = n_eff_sens,
+                           prob = alpha_var_sens, lower.tail = FALSE)
+```
+
+# Sensitivitetsanalyse på omega
+```{r}
+# definerer de værdier omega skal analyseres over
+value_omega <- data.frame(omega = c(h0_par$omega, h0_par$omega * omega_factor))
+
+# udfører simuleringen
+sens_omega_low_250 <- sens_power(
+  h0_par      = h0_par,
+  scenario_H1 = value_omega,
+  build_true_par = function(row) {
+    list(omega = row$omega, alpha1 = h0_par$alpha1,
+         beta1 = h0_par$beta1, nu = h0_par$nu)
+  },
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 3001
+)
+
+# printer værdier, og gemmer til 'plot'
+print(round(sens_omega_low_250, 4))
+omega_low_250 <- long_power(sens_omega_low_250, "omega")
+
+
+# laver plot og gemmer til senere print
+billede_omegalow_250 <- ggplot(omega_low_250, aes(x = omega, y = power, color = test, shape = test, group = test)) +
+  geom_line(linewidth = 1) + geom_point(size = 2.2) +
+  geom_hline(yintercept = alpha_crit_sens, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = h0_par$omega, color = "grey", linewidth = 1) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(title = "Følsomhed: ændring i omega", x = "omega", y = "power") +
+  theme_minimal()
+
+print(billede_omegalow_250)
+# ggsave("~/Desktop/power_omega_lav_vol_250.pdf", billede_omegalow_250, width = 8, height = 6)
+```   
+
+# Sensitivitetsanalyse på ARCH-parameter (skalerer alpha/beta)
+```{r}
+# definerer de værdier alpha skal varieres over, sikrer beta bliver proportionalt 'skruet' nedad/opad
+value_alpha <- data.frame(
+  alpha1 = c(h0_par$alpha1, arch_values)
+)
+value_beta  <- (h0_par$alpha1 + h0_par$beta1) - value_alpha
+ok         <- (value_alpha >= 0) & (value_beta >= 0) & ((value_alpha + value_beta) < 1)
+value_arch    <- data.frame(alpha1 = value_alpha[ok], beta1 = value_beta[ok])
+
+# udfører simuleringerne
+sens_arch_high_250 <- sens_power(
+  h0_par      = h0_par,
+  scenario_H1 = value_arch,
+  build_true_par = function(row) {
+    list(omega = h0_par$omega, alpha1 = row$alpha1,
+         beta1 = row$beta1, nu = h0_par$nu)
+  },
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 4001
+)
+
+# printer billede og gemmer til plot
+print(round(sens_arch_high_250, 4))
+arch_high_250 <- long_power(sens_arch_high_250, "alpha1")
+
+# laver plot og gemmer
+billede_alphahigh_250 <- ggplot(arch_high_250, aes(x = alpha1, y = power, color = test, shape = test, group = test)) +
+  geom_line(linewidth = 1) + geom_point(size = 2.2) +
+  geom_hline(yintercept = alpha_crit_sens, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = h0_par$alpha1, color = "grey", linewidth = 1) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(title = "Følsomhed: ændring i ARCH-parameter",
+       x = "alpha", y = "power") +
+  theme_minimal()
+
+print(billede_alphahigh_250)
+# ggsave("~/Desktop/power_alpha_lav_høj_250.pdf", billede_alphahigh_250, width = 8, height = 6)
+```
+
+# Sensitivitetsanalyse for persistens, alpha+beta bliver skruet ned/op sammen, mens omega også varieres for at fastholde langsigtet volatilitet
+# Anvendes kun i bilag, men analysen udføres stadig.
+```{r}
+# definerer de parametre der anvendes
+ubetinget_var <- h0_par$omega / (1 - h0_par$alpha1 - h0_par$beta1)
+alpha1_d      <- h0_par$alpha1 * d
+beta1_d       <- h0_par$beta1  * d
+persistens_d  <- alpha1_d + beta1_d
+omega_d       <- ubetinget_var * (1 - persistens_d)
+ok_d          <- (alpha1_d >= 0) & (beta1_d >= 0) &
+                  (persistens_d < 1) & (omega_d > 0)
+value_pers1 <- data.frame(alpha1 = alpha1_d[ok_d], beta1 = beta1_d[ok_d],
+                       omega = omega_d[ok_d], persistens = persistens_d[ok_d])
+
+# beregner simuleringer
+sens_pers1_low_250 <- sens_power(
+  h0_par      = h0_par,
+  scenario_H1 = value_pers1,
+  build_true_par = function(row) {
+    list(omega = row$omega, alpha1 = row$alpha1,
+         beta1 = row$beta1, nu = h0_par$nu)
+  },
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 5001
+)
+
+# printer og gemmer til plot
+print(round(sens_pers1_low_250, 4))
+pers1_low_250 <- long_power(sens_pers1_low_250, "persistens")
+
+# laver plot og gemmer figur
+billede_persistens_fast_low_250 <- ggplot(pers1_low_250, aes(x = persistens, y = power, color = test, shape = test, group = test)) +
+  geom_line(linewidth = 1) + geom_point(size = 2.2) +
+  geom_hline(yintercept = alpha_crit_sens, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = h0_par$alpha1 + h0_par$beta1,
+             color = "grey", linewidth = 1) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(title = "Følsomhed: ændring i persistens", x = "persistens", y = "power") +
+  theme_minimal()
+
+print(billede_persistens_fast_low_250)
+# ggsave("~/Desktop/power_persistens_fast_lav_vol_250.pdf", billede_persistens_fast_low_250, width = 8, height = 6)
+```
+
+# Denne analyse/simulering anvendes faktisk ikke i opgaven, men blev udført for at se hvad der skete med power, når persistens varierede,
+# men omega blev fasthhold. Endte dog med stort set en analyse af hvad der skete når langsigtet volatilitet steg/faldt, da definitionen netop gør
+# at den eksploderer ved denne analyse. Derfor blev den droppet, men udføres stadig her i koden, da den blev fjernet på et senere tidspunkt.
+```{r}
+# definerer parametre, men bruger nogen fra før, som er præcis samme
+omega_d       <- rep(h0_par$omega, length(persistens_d))
+ok_d <- (alpha1_d >= 0) & (beta1_d >= 0) &
+        (persistens_d < 1) & (omega_d > 0)
+
+value_pers2 <- data.frame(
+  alpha1 = alpha1_d[ok_d],
+  beta1  = beta1_d[ok_d],
+  omega  = omega_d[ok_d],
+  persistens = persistens_d[ok_d]
+)
+
+# udfører simuleringer
+sens_pers2_low_250 <- sens_power(
+  h0_par      = h0_par,
+  scenario_H1 = value_pers2,
+  build_true_par = function(row) {
+    list(omega = row$omega, alpha1 = row$alpha1,
+         beta1 = row$beta1, nu = h0_par$nu)
+  },
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 6001
+)
+
+# printer og gemmer til plot
+print(round(sens_pers2_low_250, 8))
+pers2_low_250 <- long_power(sens_pers2_low_250, "persistens")
+
+# laver plot, og gemmer til print
+billede_persistens_ikkefast_low_250 <- ggplot(pers2_low_250, aes(x = persistens, y = power, color = test, shape = test, group = test)) +
+  geom_line(linewidth = 1) + geom_point(size = 2.2) +
+  geom_hline(yintercept = alpha_crit_sens, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = h0_par$alpha1 + h0_par$beta1,
+             color = "grey", linewidth = 1) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(title = "Følsomhed: ændring i persistens", x = "persistens", y = "power") +
+  theme_minimal()
+
+print(billede_persistens_ikkefast_low_250)
+# ggsave("~/Desktop/power_persistens_ikkefast_lav_vol_250.pdf", billede_persistens_ikkefast_low_250, width = 8, height = 6)
+```
+
+# Sensitivitetsanalyse på antal frihedsgrader (nu)
+```{r}
+# varierer kun frihedsgrader (nu)
+value_nu <- data.frame(nu = nu_alt)
+
+# udfører simuleringer
+sens_nu_low_250 <- sens_power(
+  h0_par      = h0_par,
+  scenario_H1 = value_nu,
+  build_true_par = function(row) {
+    list(omega = h0_par$omega, alpha1 = h0_par$alpha1,
+         beta1 = h0_par$beta1, nu = row$nu)
+  },
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 7001
+)
+
+# printer og gemmer til plot
+print(round(sens_nu_low_250, 4))
+nu_low_250 <- long_power(sens_nu_low_250, "nu")
+
+# laver plot, og gemmer
+billede_frihedsgrader_low_250 <- ggplot(nu_low_250, aes(x = nu, y = power, color = test, shape = test, group = test)) +
+  geom_line(linewidth = 1) + geom_point(size = 2.2) +
+  geom_hline(yintercept = alpha_crit_sens, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = h0_par$nu, color = "grey", linewidth = 1) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(title = "Følsomhed: ændring i frihedsgrader",
+       x = "frihedsgrader", y = "power") +
+  theme_minimal()
+
+print(billede_frihedsgrader_low_250)
+# ggsave("~/Desktop/power_frihedsgrader_lav_vol_250.pdf", billede_frihedsgrader_low_250, width = 8, height = 6)
+```
+# sensitivitetsanalyse er nu færdig, går videre til tæthedsfordelinger
+
+# herfra og ned er til tæthedsfordelinger
+```{r}
+# samler de rå teststørrelser, der senere kan bruges til at blive plottet som tæthedsfordelinger for samtlige teststørrelser
+density_bundle <- function(stats, scen_label, scen_value) {
+  parts <- list(
+    Z1 = stats$Z1,
+    Z2 = stats$Z2,
+    Z3 = stats$Z3,
+    ER = stats$ER,
+    CC = stats$CC_stat
+  )
+  do.call(rbind, lapply(names(parts), function(nm) {
+    data.frame(
+      test           = nm,
+      value          = as.numeric(parts[[nm]]),
+      scenario       = scen_label,
+      scenario_value = scen_value,
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+# samme type funktion som sens_power, men returnerer hele fordelingen af hver teststørrelse, for at sammenligne tæthed under H0/H1
+sens_density <- function(h0_par, scenario_H1, build_true_par,
+                                   param_name,
+                                   n = 250, M = 5000, burn_in = 500,
+                                   alpha_es = 0.025, alpha_var = 0.01,
+                                   seed = 2026) {
+# H0-fordeling
+  stats_H0 <- compute_stats_bundle(
+    true_par = h0_par, model_par = h0_par,
+    n = n, M = M, burn_in = burn_in,
+    alpha_es = alpha_es, alpha_var = alpha_var, seed = seed
+  )
+  long_H0 <- density_bundle(stats_H0, "H0", NA_real_)
+# H1-fordeling
+  long_H1 <- do.call(rbind, lapply(seq_len(nrow(scenario_H1)), function(i) {
+    true_par_i <- build_true_par(scenario_H1[i, , drop = FALSE])
+    stats_H1_i <- compute_stats_bundle(
+      true_par = true_par_i, model_par = h0_par,
+      n = n, M = M, burn_in = burn_in,
+      alpha_es = alpha_es, alpha_var = alpha_var, seed = seed + i
+    )
+    scen_value <- as.numeric(scenario_H1[[param_name]][i])
+    scen_label <- paste0(param_name, "=", signif(scen_value, 4))
+    density_bundle(stats_H1_i, scen_label, scen_value)
+  }))
+
+  rbind(long_H0, long_H1)
+}
+```
+
+```{r}
+# Fælles funktion til at lave tæthedsfordelinger for teststørrelser.
+# Sørger for forskellige værdier af parametre bliver plottet mod H0
+plot_density <- function(values_long, test_name, param_name,
+                              select_values = NULL,
+                              n_select = NULL,
+                              trim = c(0.005, 0.995)) {
+# udvælger værdier fra ønsket test
+  d <- values_long[values_long$test == test_name & is.finite(values_long$value), ]
+# finder parameterværdier
+  if (!is.null(select_values)) {
+    h1_vals <- unique(stats::na.omit(d$scenario_value))
+    matched <- vapply(h1_vals, function(v) {
+      any(abs(v - select_values) <= 1e-6 * max(abs(v), max(abs(select_values)), 1))
+    }, logical(1))
+    keep_vals <- h1_vals[matched]
+# filtrerer data
+    d <- d[d$scenario == "H0" | d$scenario_value %in% keep_vals, ]
+  } else if (!is.null(n_select)) {
+    h1_vals <- sort(unique(stats::na.omit(d$scenario_value)))
+    if (length(h1_vals) > n_select) {
+# udvælger parameterværdier
+      idx <- round(seq(1, length(h1_vals), length.out = n_select)) 
+      h1_vals <- h1_vals[idx]
+    }
+    d <- d[d$scenario == "H0" | d$scenario_value %in% h1_vals, ]
+  }
+# fjerner ekstreme outliers for stabil akse
+  d <- do.call(rbind, lapply(split(d, d$scenario), function(sub) {
+    if (nrow(sub) < 5) return(sub)
+    qs <- quantile(sub$value, trim, na.rm = TRUE)
+    sub[sub$value >= qs[1] & sub$value <= qs[2], ]
+  }))
+# sorterer H1-scenarier
+  h1_levels <- unique(d$scenario[d$scenario != "H0"])
+  h1_order  <- h1_levels[order(d$scenario_value[match(h1_levels, d$scenario)])]
+  d$scenario <- factor(d$scenario, levels = c(h1_order, "H0"))
+# plot af tæthedskurve
+  ggplot(d, aes(x = value, color = scenario)) +
+    geom_density(linewidth = 0.9, na.rm = TRUE) +
+    labs(
+      title = paste0("Tæthed for ", test_name,
+                     " backtest under H0 og H1, ændringer i ", param_name),
+      x = "Værdi", y = "Tæthed", color = NULL
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
+# kalder plot_density for teststørrelserne for en given parameter. Sikrer man ikke behøver gøre det manuelt, trim fjerner de yderste outliers
+plot_all_tests_param <- function(values_long, param_name,
+                                     select_values = NULL,
+                                     n_select = NULL,
+                                     trim = c(0.005, 0.995)) {
+  tests <- c("Z1", "Z2", "Z3", "ER", "CC")
+  setNames(
+    lapply(tests, function(t)
+      plot_density(values_long, t, param_name, select_values, n_select, trim)),
+    tests
+  )
+}
+```
+
+
+```{r}
+# Plot for omega
+density_omega_high_250 <- sens_density(
+  h0_par = h0_par, scenario_H1 = value_omega,
+  build_true_par = function(row) list(
+    omega = row$omega, alpha1 = h0_par$alpha1,
+    beta1 = h0_par$beta1, nu = h0_par$nu
+  ),
+  param_name = "omega",
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 3001
+)
+plots_omega <- plot_all_tests_param(density_omega_high_250, "omega", n_select = 3)
+for (nm in c("Z1","Z2","Z3","ER","CC")) print(plots_omega[[nm]])
+
+# Plot for ARCH (alpha)
+density_arch_high_250 <- sens_density(
+  h0_par = h0_par, scenario_H1 = value_arch,
+  build_true_par = function(row) list(
+    omega = h0_par$omega, alpha1 = row$alpha1,
+    beta1 = row$beta1, nu = h0_par$nu
+  ),
+  param_name = "alpha1",
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 4001
+)
+plots_arch <- plot_all_tests_param(density_arch_high_250, "alpha1", n_select = 3)
+for (nm in c("Z1","Z2","Z3","ER","CC")) print(plots_arch[[nm]])
+
+# Plot for persistens (fast ubetinget varians)
+density_pers1_high_250 <- sens_density(
+  h0_par = h0_par, scenario_H1 = value_pers1,
+  build_true_par = function(row) list(
+    omega = row$omega, alpha1 = row$alpha1,
+    beta1 = row$beta1, nu = h0_par$nu
+  ),
+  param_name = "persistens",
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 5001
+)
+plots_pers1 <- plot_all_tests_param(density_pers1_high_250, "persistens", n_select = 3)
+for (nm in c("Z1","Z2","Z3","ER","CC")) print(plots_pers1[[nm]])
+
+# Plot for persistens (fast omega): dette bliver som sagt tidligere ikke brugt,
+# men blev først fjernet sent i analysen, derfor det er stadig er med her
+density_pers2_high_250 <- sens_density(
+  h0_par = h0_par, scenario_H1 = value_pers2,
+  build_true_par = function(row) list(
+    omega = row$omega, alpha1 = row$alpha1,
+    beta1 = row$beta1, nu = h0_par$nu
+  ),
+  param_name = "persistens",
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 6001
+)
+plots_pers2 <- plot_all_tests_param(density_pers2_high_250, "persistens", n_select = 3)
+for (nm in c("Z1","Z2","Z3","ER","CC")) print(plots_pers2[[nm]])
+
+# Plot for frihedsgrader (nu)
+density_nu_high_250 <- sens_density(
+  h0_par = h0_par, scenario_H1 = value_nu,
+  build_true_par = function(row) list(
+    omega = h0_par$omega, alpha1 = h0_par$alpha1,
+    beta1 = h0_par$beta1, nu = row$nu
+  ),
+  param_name = "nu",
+  n = n_sens, M = M_sens, burn_in = burn_in_sens,
+  alpha_es = alpha_es_sens, alpha_var = alpha_var_sens, seed = 7001
+)
+plots_nu <- plot_all_tests_param(density_nu_high_250, "nu", n_select = 3)
+for (nm in c("Z1","Z2","Z3","ER","CC")) print(plots_nu[[nm]])
+```
+
+```{r}
+# Gemmer plots for teststørrelserne
+# Omega
+ggsave("~/Desktop/density_omega_Z1.pdf", plots_omega[["Z1"]], width = 8, height = 6)
+ggsave("~/Desktop/density_omega_Z2.pdf", plots_omega[["Z2"]], width = 8, height = 6)
+ggsave("~/Desktop/density_omega_Z3.pdf", plots_omega[["Z3"]], width = 8, height = 6)
+ggsave("~/Desktop/density_omega_ER.pdf", plots_omega[["ER"]], width = 8, height = 6)
+ggsave("~/Desktop/density_omega_CC.pdf", plots_omega[["CC"]], width = 8, height = 6)
+
+# ARCH (alpha)
+ggsave("~/Desktop/density_arch_Z1.pdf", plots_arch[["Z1"]], width = 8, height = 6)
+ggsave("~/Desktop/density_arch_Z2.pdf", plots_arch[["Z2"]], width = 8, height = 6)
+ggsave("~/Desktop/density_arch_Z3.pdf", plots_arch[["Z3"]], width = 8, height = 6)
+ggsave("~/Desktop/density_arch_ER.pdf", plots_arch[["ER"]], width = 8, height = 6)
+ggsave("~/Desktop/density_arch_CC.pdf", plots_arch[["CC"]], width = 8, height = 6)
+
+# Persistens (fast ubetinget varians)
+ggsave("~/Desktop/density_pers_fast_Z1.pdf", plots_pers1[["Z1"]], width = 8, height = 6)
+ggsave("~/Desktop/density_pers_fast_Z2.pdf", plots_pers1[["Z2"]], width = 8, height = 6)
+ggsave("~/Desktop/density_pers_fast_Z3.pdf", plots_pers1[["Z3"]], width = 8, height = 6)
+ggsave("~/Desktop/density_pers_fast_ER.pdf", plots_pers1[["ER"]], width = 8, height = 6)
+ggsave("~/Desktop/density_pers_fast_CC.pdf", plots_pers1[["CC"]], width = 8, height = 6)
+
+# Persistens (fast omega)
+ggsave("~/Desktop/density_pers_ikkefast_Z1.pdf", plots_pers2[["Z1"]], width = 8, height = 6)
+ggsave("~/Desktop/density_pers_ikkefast_Z2.pdf", plots_pers2[["Z2"]], width = 8, height = 6)
+ggsave("~/Desktop/density_pers_ikkefast_Z3.pdf", plots_pers2[["Z3"]], width = 8, height = 6)
+ggsave("~/Desktop/density_pers_ikkefast_ER.pdf", plots_pers2[["ER"]], width = 8, height = 6)
+ggsave("~/Desktop/density_pers_ikkefast_CC.pdf", plots_pers2[["CC"]], width = 8, height = 6)
+
+# Frihedsgrader (nu)
+ggsave("~/Desktop/density_nu_Z1.pdf", plots_nu[["Z1"]], width = 8, height = 6)
+ggsave("~/Desktop/density_nu_Z2.pdf", plots_nu[["Z2"]], width = 8, height = 6)
+ggsave("~/Desktop/density_nu_Z3.pdf", plots_nu[["Z3"]], width = 8, height = 6)
+ggsave("~/Desktop/density_nu_ER.pdf", plots_nu[["ER"]], width = 8, height = 6)
+ggsave("~/Desktop/density_nu_CC.pdf", plots_nu[["CC"]], width = 8, height = 6)
+```

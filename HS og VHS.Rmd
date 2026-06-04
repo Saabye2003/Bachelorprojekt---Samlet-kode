@@ -1,0 +1,493 @@
+---
+title: "Bachelor - HS og VHS"
+output: html_document
+date: "2026-04-30"
+---
+# Dokumentet forudsætter funktioner indlæst/defineret i dokument 4
+# Beregner HS og VHS for 4 teststørrelser, samt plotter tæthedsfordelinger
+# Er det 6. dokument i rækken
+# Decay-parameter er først defineret som lambda, men pr teori fra christoffersen er det brugt i opgaven som eta, derfor inkonsistens i r-dokument
+# kode virker dog stadig, der er bare uoverensstemmelse med navne
+
+# Her defineres funktion til at simulere historisk simulation (HS)
+```{r}
+compute_hs_forecasts <- function(X, alpha = 0.025, window_size = 250) {
+  M      <- nrow(X)
+  n      <- ncol(X)
+  n_eval <- n - window_size
+
+  VaR_mat <- matrix(NA_real_, M, n_eval)
+  ES_mat  <- matrix(NA_real_, M, n_eval)
+
+  for (t in seq_len(n_eval)) {
+    hist_window <- X[, t:(t + window_size - 1L), drop = FALSE]  
+
+    VaR_mat[, t] <- -apply(hist_window, 1L, quantile, probs = alpha, type = 1L)
+
+    var_t <- VaR_mat[, t]
+    ES_mat[, t] <- vapply(seq_len(M), function(m) {
+      exc <- hist_window[m, hist_window[m, ] < -var_t[m]]
+      if (length(exc) == 0L) var_t[m] else -mean(exc)
+    }, numeric(1L))
+  }
+
+  list(VaR = VaR_mat, ES = ES_mat)
+}
+```
+
+# Definerer nu funktion til simulering af vægtet historisk simulation (vhs)
+```{r}
+compute_vhs_forecasts <- function(X, alpha = 0.025, window_size = 250,
+                                  lambda = 0.98) {
+  M      <- nrow(X)
+  n      <- ncol(X)
+  n_eval <- n - window_size
+
+  weights_unnorm  <- lambda^((window_size - 1L):0L)
+  weights <- weights_unnorm / sum(weights_unnorm)
+
+  VaR_mat <- matrix(NA_real_, M, n_eval)
+  ES_mat  <- matrix(NA_real_, M, n_eval)
+
+  for (t in seq_len(n_eval)) {
+    hist_window <- X[, t:(t + window_size - 1L), drop = FALSE]
+
+    vhs_stats_t <- t(apply(hist_window, 1L, function(sim_path) {
+      sorted_idx   <- order(sim_path)          
+      sorted_returns   <- sim_path[sorted_idx]
+      sorted_weights   <- weights[sorted_idx]
+      cum_w <- cumsum(sorted_weights)
+
+      var_index <- which(cum_w >= alpha)[1L]
+      if (is.na(var_index)) var_index <- window_size
+
+      var_val  <- -sorted_returns[var_index]
+
+      tail_idx <- seq_len(var_index)
+      tail_w   <- sorted_weights[tail_idx]
+      es_val   <- -sum(sorted_returns[tail_idx] * tail_w) / sum(tail_w)
+
+      c(var_val, es_val)
+    }))
+
+    VaR_mat[, t] <- vhs_stats_t[, 1L]
+    ES_mat[, t]  <- vhs_stats_t[, 2L]
+  }
+
+  list(VaR = VaR_mat, ES = ES_mat)
+}
+```
+
+# rullende standardafvigelse, bruges som sigma til CC-testen
+```{r}
+compute_rolling_sigma <- function(X, window_size = 250) {
+  M      <- nrow(X)
+  n      <- ncol(X)
+  n_eval <- n - window_size
+  sig_mat <- matrix(NA_real_, M, n_eval)
+  for (t in seq_len(n_eval)) {
+    sig_mat[, t] <- apply(X[, t:(t + window_size - 1L)], 1L, sd)
+  }
+  sig_mat
+}
+```
+
+# minder om compute_stats_bundle fra dokument 4.
+# simulerer baner fra GARCH(1,1)-model, men prædikterer VaR/ES fra HS/VHS, altså funktion der simulerer H0 vs H1, men samler hs/vhs i én funktion
+```{r}
+compute_hs_stats_bundle <- function(
+    true_par,
+    method      = c("hs", "vhs"),
+    n           = 250,
+    M           = 1000,
+    window_size = 250,
+    burn_in     = 500,
+    alpha_es    = 0.025,
+    alpha_var   = 0.01,
+    lambda      = 0.98,
+    seed        = NULL) {
+
+  method <- match.arg(method)
+  if (!is.null(seed)) set.seed(seed)
+
+# simulerer 'sande' GARCH model, bruger funktion fra forrige dokument
+  sim <- simulate_garch_matrix(
+    n       = n + window_size,
+    omega   = true_par$omega,
+    alpha1  = true_par$alpha1,
+    beta1   = true_par$beta1,
+    nu      = true_par$nu,
+    burn_in = burn_in,
+    M       = M
+  )
+
+  X_full     <- sim$X      
+  sigma_full <- sim$sigma  
+
+# beregner HS/VHS ud fra hvilken metode der analyseres
+  pred <- switch(method,
+    hs   = compute_hs_forecasts(
+               X_full, alpha = alpha_es, window_size = window_size),
+    vhs  = compute_vhs_forecasts(
+               X_full, alpha = alpha_es, window_size = window_size,
+               lambda = lambda)
+  )
+
+  X_eval  <- X_full[,     (window_size + 1L):(window_size + n), drop = FALSE]
+  VaR_t   <- pred$VaR   
+  ES_t    <- pred$ES    
+
+# beregner sigma til CC-testen  
+  sigma_cc <- switch(method,
+    hs   = compute_rolling_sigma(X_full, window_size = window_size),
+    vhs  = compute_rolling_sigma(X_full, window_size = window_size)
+  )
+
+# Returnerer teststørrelser, på samme måde som tidligere og af erfaring bliver både cc_pval og cc_stat brugt, én til power anden til kritisk værdi
+  Z1_val <- acerbi_Z1_td(X_eval, VaR_t, ES_t)
+  Z2_val <- acerbi_Z2_td(X_eval, VaR_t, ES_t, alpha = alpha_es)
+  ER_val <- compute_ER_td(X_eval, VaR_t, ES_t)
+  CC_val <- compute_CC_td(X_eval, VaR_t, ES_t, sigma_cc, alpha_es)
+
+  list(
+    Z1        = Z1_val,
+    Z2        = Z2_val,
+    CC_pval   = CC_val$pval,
+    CC_stat   = CC_val$stat,
+    ER        = ER_val,
+    n_eff     = n
+  )
+}
+```
+
+# funktion til at beregne power som funktion af empirisk størrelse for de fire teststørrelser.
+# Returnerer data klar til plot, som senere bliver vist visuelt
+```{r}
+# funktion der bruges til at beregne power
+estimate_power_hs <- function(stats_H0, stats_H1,
+                               sig_levels = seq(0, 1, by = 0.01)) {
+
+  lower_tail_power <- function(x0, x1, alpha_level) {
+    x0 <- x0[is.finite(x0)]
+    x1 <- x1[is.finite(x1)]
+    q  <- unname(quantile(x0, probs = alpha_level, na.rm = TRUE))
+    mean(x1 < q, na.rm = TRUE)
+  }
+
+  do.call(rbind, lapply(sig_levels, function(sl) {
+    data.frame(
+      empirisk_størrelse = sl,
+      Z1   = lower_tail_power(stats_H0$Z1,      stats_H1$Z1,      sl),
+      Z2   = lower_tail_power(stats_H0$Z2,      stats_H1$Z2,      sl),
+      CC   = lower_tail_power(stats_H0$CC_pval, stats_H1$CC_pval, sl),
+      ER   = lower_tail_power(stats_H0$ER,      stats_H1$ER,      sl)
+    )
+  }))
+}
+
+
+# funktion der bruges til at plotte powerkurver (power vs empirisk størrelse)
+plot_power_hs <- function(power_df, title = "Power vs empirisk størrelse") {
+  long_df <- reshape(
+    power_df,
+    varying   = c("Z1", "Z2", "CC", "ER"),
+    v.names   = "power",
+    timevar   = "test",
+    times     = c("Z1", "Z2", "CC", "ER"),
+    direction = "long"
+  )
+  rownames(long_df) <- NULL
+
+  ggplot(long_df,
+         aes(x = empirisk_størrelse, y = power,
+             colour = test, group = test)) +
+    geom_line(linewidth = 1.1) +
+    geom_abline(slope = 1, intercept = 0,
+                linetype = "solid", colour = "black", linewidth = 0.6) +
+    scale_colour_manual(
+      values = c(Z1 = "red", Z2 = "blue",
+                 CC = "darkgreen", ER = "orange"),
+      name = "test"
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+    labs(
+      title = title,
+      x     = "empirisk størrelse",
+      y     = "power"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title      = element_text(hjust = 0.5),
+      legend.position = "bottom"
+    )
+}
+```
+
+# definerer parametre, der bruges til simuleringen
+```{r}
+# H0-parametre, skal indstilles manuelt alt efter høj/lav volatilitet
+h0_par <- list(
+  omega  = 0.000003693743,
+  alpha1 = 0.1520591,
+  beta1  = 0.8295477,
+  nu     = 7.090743
+)
+
+# andre defintioner/variable der bruges
+M_power     <- 5000   
+n_power     <- 250    
+window_size <- 250    
+burn_in     <- 500    
+alpha_es    <- 0.025  
+alpha_var   <- 0.01   
+lambda_vhs  <- 0.98   
+SEED        <- 2026
+```
+
+# Herfra starter simuleringer og "powerplots"
+```{r}
+# simulerer H0 GARCH, fra tidligere defineret funktion
+stats_H0 <- compute_stats_bundle(
+  true_par  = h0_par,
+  model_par = h0_par,
+  n         = n_power,
+  M         = M_power,
+  burn_in   = burn_in,
+  alpha_es  = alpha_es,
+  alpha_var = alpha_var,
+  seed      = SEED
+)
+```
+
+```{r}
+# Simulerer H1 for HS, bruger fællesfunktionen men "method = hs"
+stats_H1_hs <- compute_hs_stats_bundle(
+  true_par    = h0_par,
+  method      = "hs",
+  n           = n_power,
+  M           = M_power,
+  window_size = window_size,
+  burn_in     = burn_in,
+  alpha_es    = alpha_es,
+  alpha_var   = alpha_var,
+  seed        = SEED + 1L
+)
+```
+
+```{r}
+# Simulerer H1 for VHS, bruger fællesfunktion men "method = vhs"
+stats_H1_vhs <- compute_hs_stats_bundle(
+  true_par    = h0_par,
+  method      = "vhs",
+  n           = n_power,
+  M           = M_power,
+  window_size = window_size,
+  burn_in     = burn_in,
+  alpha_es    = alpha_es,
+  alpha_var   = alpha_var,
+  lambda      = lambda_vhs,
+  seed        = SEED + 2L
+)
+```
+
+# Her plottes HS og VHS
+```{r}
+# bruger funktioner og simuleringer fra tidligere til at printe 'powerplots'
+power_hs_high_250 <- estimate_power_hs(stats_H0, stats_H1_hs)
+
+p_hs_high_250 <- plot_power_hs(
+  power_hs_high_250,
+  title = "Power vs empiriske størrelser med HS, n=250"
+)
+print(p_hs_high_250)
+# ggsave("~/Desktop/power_hs_high_250.pdf", p_hs_high_250, width = 8, height = 5)
+```
+
+```{r}
+# på samme måde som før, et 'powerplot' for VHS
+power_vhs_high_250 <- estimate_power_hs(stats_H0, stats_H1_vhs)
+
+p_vhs_high_250 <- plot_power_hs(
+  power_vhs_high_250,
+  title = bquote("Power vs empiriske størrelser med VHS, n=250 (" 
+                  * eta == .(lambda_vhs) * ")")
+)
+print(p_vhs_high_250)
+# ggsave("~/Desktop/power_vhs_high_250.pdf", p_vhs_high_250, width = 8, height = 5)
+```
+# 'powerplots' er nu færdige
+
+# Herfra er så til tæthedsplotsne for HS og VHS for de fire teststørrelser, der også bruges til afsnit om HS og VHS
+```{r}
+# definerer først en funktion til at regne og plotte tæthed for H0 vs H1 for udvalgte teststørrelse
+plot_density_h0_vs_h1 <- function(values_h0, values_h1,
+                                  test_label, method_label,
+                                  h1_colour    = "blue",
+                                  x_axis_label = "Værdi") {
+  h0_name <- "H0 (GARCH)"
+  h1_name <- paste0("H1 (", method_label, ")")
+
+  df <- data.frame(
+    value    = c(values_h0, values_h1),
+    scenarie = factor(c(
+      rep(h0_name, length(values_h0)),
+      rep(h1_name, length(values_h1))
+    ), levels = c(h0_name, h1_name))
+  )
+  df <- df[is.finite(df$value), ]   
+
+  colour_map <- setNames(c("black", h1_colour), c(h0_name, h1_name))
+
+  ggplot(df, aes(x = value, fill = scenarie, colour = scenarie)) +
+    geom_density(alpha = 0.35, linewidth = 0.9) +
+    scale_fill_manual(values   = colour_map) +
+    scale_colour_manual(values = colour_map) +
+    labs(
+      title  = paste0("Tæthed for ", test_label,
+                      " under H0 og H1 ved ", method_label),
+      x      = x_axis_label,
+      y      = "Tæthed",
+      fill   = NULL,
+      colour = NULL
+    ) +
+    theme_bw(base_size = 12) +
+    theme(plot.title      = element_text(hjust = 0.5),
+          legend.position = "bottom")
+}
+```
+
+```{r}
+# Tæthedsplots for de fire teststørrelser under H0 og H1 med HS
+
+# Z1
+p_z1_hs <- plot_density_h0_vs_h1(
+  values_h0    = stats_H0$Z1,
+  values_h1    = stats_H1_hs$Z1,
+  test_label   = "Z1",
+  method_label = "HS",
+  h1_colour    = "red",
+  x_axis_label = "Z1-værdi"
+)
+
+# Z2
+p_z2_hs <- plot_density_h0_vs_h1(
+  values_h0    = stats_H0$Z2,
+  values_h1    = stats_H1_hs$Z2,
+  test_label   = "Z2",
+  method_label = "HS",
+  h1_colour    = "blue",
+  x_axis_label = "Z2-værdi"
+)
+
+# ER
+p_er_hs <- plot_density_h0_vs_h1(
+  values_h0    = stats_H0$ER,
+  values_h1    = stats_H1_hs$ER,
+  test_label   = "ER",
+  method_label = "HS",
+  h1_colour    = "orange",
+  x_axis_label = "ER-værdi"        
+)
+
+# CC
+p_cc_hs <- plot_density_h0_vs_h1(
+  values_h0    = stats_H0$CC_stat,
+  values_h1    = stats_H1_hs$CC_stat,
+  test_label   = "CC",
+  method_label = "HS",
+  h1_colour    = "darkgreen",
+  x_axis_label = "CC-værdi"        
+)
+
+# printer og gemmer plots
+print(p_z1_hs)
+print(p_z2_hs)
+print(p_er_hs)
+print(p_cc_hs)
+
+# ggsave("~/Desktop/taethed_z1_hs.pdf", p_z1_hs, width = 8, height = 6)
+# ggsave("~/Desktop/taethed_z2_hs.pdf", p_z2_hs, width = 8, height = 6)
+# ggsave("~/Desktop/taethed_er_hs.pdf", p_er_hs, width = 8, height = 6)
+# ggsave("~/Desktop/taethed_cc_hs.pdf", p_cc_hs, width = 8, height = 6)
+```
+
+```{r}
+# tæthedsplots for de fire teststørrelser under H0 og H1 ved VHS, præcis samme som før, bare erstattet med vhs
+vhs_label <- paste0("VHS (η=", lambda_vhs, ")")
+
+# Z1
+p_z1_vhs <- plot_density_h0_vs_h1(
+  values_h0    = stats_H0$Z1,
+  values_h1    = stats_H1_vhs$Z1,
+  test_label   = "Z1",
+  method_label = vhs_label,
+  h1_colour    = "red",
+  x_axis_label = "Z1-værdi"
+)
+
+# Z2
+p_z2_vhs <- plot_density_h0_vs_h1(
+  values_h0    = stats_H0$Z2,
+  values_h1    = stats_H1_vhs$Z2,
+  test_label   = "Z2",
+  method_label = vhs_label,
+  h1_colour    = "blue",
+  x_axis_label = "Z2-værdi"
+)
+
+# ER
+p_er_vhs <- plot_density_h0_vs_h1(
+  values_h0    = stats_H0$ER,
+  values_h1    = stats_H1_vhs$ER,
+  test_label   = "ER",
+  method_label = vhs_label,
+  h1_colour    = "orange",
+  x_axis_label = "ER-værdi"
+)
+
+# CC
+p_cc_vhs <- plot_density_h0_vs_h1(
+  values_h0    = stats_H0$CC_stat,
+  values_h1    = stats_H1_vhs$CC_stat,
+  test_label   = "CC",
+  method_label = vhs_label,
+  h1_colour    = "darkgreen",
+  x_axis_label = "CC-værdi"
+)
+
+# printer og gemmer plots
+print(p_z1_vhs)
+print(p_z2_vhs)
+print(p_er_vhs)
+print(p_cc_vhs)
+
+# eta kom ikke med, derfor gemmer jeg lige på en anden måde
+p_z1_vhs <- p_z1_vhs +
+  labs(title = bquote(
+    "Tæthed for Z1 under H0 og H1 ved VHS (" *
+    eta == .(lambda_vhs) * ")"
+  ))
+
+p_z2_vhs <- p_z2_vhs +
+  labs(title = bquote(
+    "Tæthed for Z2 under H0 og H1 ved VHS (" *
+    eta == .(lambda_vhs) * ")"
+  ))
+
+p_er_vhs <- p_er_vhs +
+  labs(title = bquote(
+    "Tæthed for ER under H0 og H1 ved VHS (" *
+    eta == .(lambda_vhs) * ")"
+  ))
+
+p_cc_vhs <- p_cc_vhs +
+  labs(title = bquote(
+    "Tæthed for CC under H0 og H1 ved VHS (" *
+    eta == .(lambda_vhs) * ")"
+  ))
+
+ggsave("~/Desktop/taethed_z1_vhs.pdf", p_z1_vhs, width = 8, height = 6)
+ggsave("~/Desktop/taethed_z2_vhs.pdf", p_z2_vhs, width = 8, height = 6)
+ggsave("~/Desktop/taethed_er_vhs.pdf", p_er_vhs, width = 8, height = 6)
+ggsave("~/Desktop/taethed_cc_vhs.pdf", p_cc_vhs, width = 8, height = 6)
+```

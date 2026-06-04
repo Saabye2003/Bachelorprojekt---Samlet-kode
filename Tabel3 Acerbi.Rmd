@@ -1,0 +1,314 @@
+---
+title: "Bachelor - Tabel 3 replikeret fra Acerbi"
+output: html_document
+date: "2026-02-24"
+---
+# Dette dokument replikerer tabel 3 fra Acerbi
+# Er det 3. dokument i rækken
+
+# igen bliver der faktisk simuleret for meget for VaR, ligesom der blev i forrige dokument for både VaR og H0 ved 100 frihedsgrader
+# men er blot blevet fjernet senere
+
+# På samme måde som før startes med Student t, herefter std. t-fordelt
+# Metoden er den samme, så alt gentages fra forrige dokument med tabel 2, dog med fast VaR nu, hvorfor Z1 introduceres
+```{r}
+# Z1 indgår nu, derfor skal H0/H1 simuleres
+
+X_alts_t_100_fixed <- list(df10 = X_t_fixed_10_shift100, df5 = X_t_fixed_5_shift100, df3 = X_t_fixed_3_shift100)
+X_alts_t_10_fixed  <- list(df5 = X_t_fixed_5_shift10, df3 = X_t_fixed_3_shift10)
+
+Z1_t_100_null <- acerbi_Z1(X_t_100, VaR_t_100, ES_t_100)
+Z1_t_10_null  <- acerbi_Z1(X_t_10,  VaR_t_10,  ES_t_10)
+
+Z1_t_100_alt_fixed <- lapply(X_alts_t_100_fixed, function(x) acerbi_Z1(x, VaR_t_100, ES_t_100))
+Z1_t_10_alt_fixed  <- lapply(X_alts_t_10_fixed,  function(x) acerbi_Z1(x, VaR_t_10,  ES_t_10))
+
+q_t_100_Z1_fixed <- quantile(Z1_t_100_null, probs = c(alpha_true_5, alpha_true_10), na.rm = TRUE)
+q_t_10_Z1_fixed  <- quantile(Z1_t_10_null,  probs = c(alpha_true_5, alpha_true_10), na.rm = TRUE)
+```
+
+```{r}
+# H0/H1 fordeling for Z2
+
+# Behøves ikke køres igen, er de samme som fra forrige dokument
+# Z2_t_100_null <- acerbi_Z2(X_t_100, VaR_t_100, ES_t_100, alpha)
+# Z2_t_10_null  <- acerbi_Z2(X_t_10,  VaR_t_10,  ES_t_10,  alpha)
+
+Z2_t_100_alt_fixed <- lapply(X_alts_t_100_fixed, function(x) acerbi_Z2(x, VaR_t_100, ES_t_100, alpha))
+Z2_t_10_alt_fixed  <- lapply(X_alts_t_10_fixed,  function(x) acerbi_Z2(x, VaR_t_10,  ES_t_10,  alpha))
+
+# Er faktisk allerede defineret fra forrige dokument med q_t_100_Z2, behøves derfor ikke
+q_t_100_Z2_fixed <- quantile(Z2_t_100_null, probs = c(alpha_true_5, alpha_true_10))
+q_t_10_Z2_fixed  <- quantile(Z2_t_10_null,  probs = c(alpha_true_5, alpha_true_10))
+```
+
+```{r}
+# H0/H1 fordeling for Z3
+
+# Behøves ikke køres igen, er de samme som fra forrige dokument
+# Z3_t_100_null <- acerbi_Z3(X_t_100, df_H0 = 100, alpha, tau = 1)
+# Z3_t_10_null  <- acerbi_Z3(X_t_10, df_H0 = 10, alpha, tau = 1)
+
+Z3_t_100_alt_fixed <- lapply(X_alts_t_100_fixed, function(x) acerbi_Z3(x, df_H0 = 100, alpha, tau = 1, mu = 0))
+Z3_t_10_alt_fixed  <- lapply(X_alts_t_10_fixed,  function(x) acerbi_Z3(x, df_H0 = 10, alpha, tau = 1, mu = 0))
+
+# Er faktisk allerede defineret fra forrige dokument med q_t_100_Z3, behøves derfor ikke, men koden anvender q_t_100_Z3_fixed osv.
+q_t_100_Z3_fixed <- quantile(Z3_t_100_null, probs = c(alpha_true_5, alpha_true_10))
+q_t_10_Z3_fixed <- quantile(Z3_t_10_null,  probs = c(alpha_true_5, alpha_true_10))
+```
+
+```{r}
+# Power for de tre teststørrelser under alle scenarier
+
+# 100 frihedsgrader
+ZPower_t_100_fixed <- data.frame(
+  H0 = "df=100",
+  H1 = rep(names(X_alts_t_100_fixed), 2),
+  Signifikansniveau = rep(c(alpha_true_5, alpha_true_10), each = 3),
+  
+  Z1_Teststyrke = c(
+    sapply(Z1_t_100_alt_fixed, function(z) Z_power(z, q_t_100_Z1_fixed[1])),
+    sapply(Z1_t_100_alt_fixed, function(z) Z_power(z, q_t_100_Z1_fixed[2]))
+  ),
+  Z2_Teststyrke = c(
+    sapply(Z2_t_100_alt_fixed, function(z) Z_power(z, q_t_100_Z2_fixed[1])),
+    sapply(Z2_t_100_alt_fixed, function(z) Z_power(z, q_t_100_Z2_fixed[2]))
+  ),
+  Z3_Teststyrke = c(
+    sapply(Z3_t_100_alt_fixed, function(z) Z_power(z, q_t_100_Z3_fixed[1])),
+    sapply(Z3_t_100_alt_fixed, function(z) Z_power(z, q_t_100_Z3_fixed[2]))
+  )
+)
+
+# 10 frihedsgrader
+ZPower_t_10_fixed <- data.frame(
+  H0 = "df=10",
+  H1 = rep(names(X_alts_t_10_fixed), 2),
+  Signifikansniveau = rep(c(alpha_true_5, alpha_true_10), each = 2),
+  
+  Z1_Teststyrke = c(
+    sapply(Z1_t_10_alt_fixed, function(z) Z_power(z, q_t_10_Z1_fixed[1])),
+    sapply(Z1_t_10_alt_fixed, function(z) Z_power(z, q_t_10_Z1_fixed[2]))
+  ),
+  Z2_Teststyrke = c(
+    sapply(Z2_t_10_alt_fixed, function(z) Z_power(z, q_t_10_Z2_fixed[1])),
+    sapply(Z2_t_10_alt_fixed, function(z) Z_power(z, q_t_10_Z2_fixed[2]))
+  ),
+  Z3_Teststyrke = c(
+    sapply(Z3_t_10_alt_fixed, function(z) Z_power(z, q_t_10_Z3_fixed[1])),
+    sapply(Z3_t_10_alt_fixed, function(z) Z_power(z, q_t_10_Z3_fixed[2]))
+  )
+)
+# printer tabeller
+ZPower_t_100_fixed
+ZPower_t_10_fixed
+```
+
+```{r}
+# Udregner power for VaR-overskridelsestest
+
+# Power under H0
+VaR1_t_100 <- -qt(0.01, df = 100)
+VaR1_t_10  <- -qt(0.01, df = 10)
+
+# Power under H1
+VaRpow_t100_5_fixed  <- VaR_power(X_t_fixed_5_shift100,  VaR1_t_100, c_5)
+VaRpow_t100_3_fixed  <- VaR_power(X_t_fixed_3_shift100,  VaR1_t_100, c_5)
+VaRpow_t100_10_fixed <- VaR_power(X_t_fixed_10_shift100, VaR1_t_100, c_5)  
+
+VaRpow_t100_5_10_fixed  <- VaR_power(X_t_fixed_5_shift100,  VaR1_t_100, c_10)
+VaRpow_t100_3_10_fixed  <- VaR_power(X_t_fixed_3_shift100,  VaR1_t_100, c_10)
+VaRpow_t100_10_10_fixed <- VaR_power(X_t_fixed_10_shift100, VaR1_t_100, c_10)
+
+VaRpow_t10_5_fixed   <- VaR_power(X_t_fixed_5_shift10, VaR1_t_10, c_5)
+VaRpow_t10_3_fixed   <- VaR_power(X_t_fixed_3_shift10, VaR1_t_10, c_5)
+
+VaRpow_t10_5_10_fixed <- VaR_power(X_t_fixed_5_shift10, VaR1_t_10, c_10)
+VaRpow_t10_3_10_fixed <- VaR_power(X_t_fixed_3_shift10, VaR1_t_10, c_10)
+
+# Beregner og tilføjer power til tabellen fra før
+ZPower_t_100_fixed$VaR_1pct_power <- c(
+  c(VaRpow_t100_10_fixed, VaRpow_t100_5_fixed, VaRpow_t100_3_fixed),
+  c(VaRpow_t100_10_10_fixed, VaRpow_t100_5_10_fixed, VaRpow_t100_3_10_fixed)
+)
+
+ZPower_t_10_fixed$VaR_1pct_power <- c(
+  c(VaRpow_t10_5_fixed, VaRpow_t10_3_fixed),
+  c(VaRpow_t10_5_10_fixed, VaRpow_t10_3_10_fixed)
+)
+# printer tabel
+ZPower_t_100_fixed
+ZPower_t_10_fixed
+```
+
+# Herfra og ned er nu til standardiseret student t-fordeling, metoden er præcis den samme
+```{r}
+# simulerer H0/H1 for Z1
+
+X_alts_stdt_100_fixed <- list(df10 = X_stdt_fixed_10_shift100, df5 = X_stdt_fixed_5_shift100, df3 = X_stdt_fixed_3_shift100)
+X_alts_stdt_10_fixed  <- list(df5 = X_stdt_fixed_5_shift10, df3 = X_stdt_fixed_3_shift10)
+
+Z1_stdt_100_null <- acerbi_Z1(X_stdt_100, VaR_stdt_100, ES_stdt_100)
+Z1_stdt_10_null  <- acerbi_Z1(X_stdt_10,  VaR_stdt_10,  ES_stdt_10)
+
+Z1_stdt_100_alt_fixed <- lapply(X_alts_stdt_100_fixed, function(x) acerbi_Z1(x, VaR_stdt_100, ES_stdt_100))
+Z1_stdt_10_alt_fixed  <- lapply(X_alts_stdt_10_fixed,  function(x) acerbi_Z1(x, VaR_stdt_10,  ES_stdt_10))
+
+q_stdt_100_Z1_fixed <- quantile(Z1_stdt_100_null, probs = c(alpha_true_5, alpha_true_10), na.rm = TRUE)
+q_stdt_10_Z1_fixed  <- quantile(Z1_stdt_10_null,  probs = c(alpha_true_5, alpha_true_10), na.rm = TRUE)
+```
+
+```{r}
+# H0/H1 for Z2
+
+# Er allerede kørt i forrige dokument
+#Z2_stdt_100_null <- acerbi_Z2(X_stdt_100, VaR_stdt_100, ES_stdt_100, alpha)
+# Z2_stdt_10_null  <- acerbi_Z2(X_stdt_10,  VaR_stdt_10,  ES_stdt_10,  alpha)
+
+Z2_stdt_100_alt_fixed <- lapply(X_alts_stdt_100_fixed, function(x) acerbi_Z2(x, VaR_stdt_100, ES_stdt_100, alpha))
+Z2_stdt_10_alt_fixed  <- lapply(X_alts_stdt_10_fixed,  function(x) acerbi_Z2(x, VaR_stdt_10,  ES_stdt_10,  alpha))
+
+# Er faktisk allerede defineret fra forrige dokument med q_stdt_100_Z2, behøves derfor ikke, men q_stdt_100_Z2_fixed bruges senere
+q_stdt_100_Z2_fixed <- quantile(Z2_stdt_100_null, probs = c(alpha_true_5, alpha_true_10))
+q_stdt_10_Z2_fixed  <- quantile(Z2_stdt_10_null,  probs = c(alpha_true_5, alpha_true_10))
+```
+
+```{r}
+# H0/H1 for Z3
+
+# Er allerede kørt i forrige dokument
+# Z3_stdt_100_null <- acerbi_Z3(X_stdt_100, df_H0 = 100, alpha, tau = 1)
+# Z3_stdt_10_null  <- acerbi_Z3(X_stdt_10, df_H0 = 10, alpha, tau = 1)
+
+Z3_stdt_100_alt_fixed <- lapply(X_alts_stdt_100_fixed, function(x) acerbi_Z3(x, df_H0 = 100, alpha, tau = 1, mu = 0))
+Z3_stdt_10_alt_fixed  <- lapply(X_alts_stdt_10_fixed,  function(x) acerbi_Z3(x, df_H0 = 10, alpha, tau = 1, mu = 0))
+
+# Er faktisk allerede defineret fra forrige dokument med q_stdt_100_Z3, behøves derfor ikke, men bruges senere
+q_stdt_100_Z3_fixed <- quantile(Z3_stdt_100_null, probs = c(alpha_true_5, alpha_true_10))
+q_stdt_10_Z3_fixed <- quantile(Z3_stdt_10_null,  probs = c(alpha_true_5, alpha_true_10))
+```
+
+```{r}
+# Udregner power for de 3 teststørrelser under de forskellige scenarier
+
+# 100 frihedsgrader
+ZPower_stdt_100_fixed <- data.frame(
+  H0 = "df=100",
+  H1 = rep(names(X_alts_stdt_100_fixed), 2),
+  Signifikansniveau = rep(c(alpha_true_5, alpha_true_10), each = 3),
+  
+  Z1_Teststyrke = c(
+    sapply(Z1_stdt_100_alt_fixed, function(z) Z_power(z, q_stdt_100_Z1_fixed[1])),
+    sapply(Z1_stdt_100_alt_fixed, function(z) Z_power(z, q_stdt_100_Z1_fixed[2]))
+  ),
+  Z2_Teststyrke = c(
+    sapply(Z2_stdt_100_alt_fixed, function(z) Z_power(z, q_stdt_100_Z2_fixed[1])),
+    sapply(Z2_stdt_100_alt_fixed, function(z) Z_power(z, q_stdt_100_Z2_fixed[2]))
+  ),
+  Z3_Teststyrke = c(
+    sapply(Z3_stdt_100_alt_fixed, function(z) Z_power(z, q_stdt_100_Z3_fixed[1])),
+    sapply(Z3_stdt_100_alt_fixed, function(z) Z_power(z, q_stdt_100_Z3_fixed[2]))
+  )
+)
+
+# 10 frihedsgrader
+ZPower_stdt_10_fixed <- data.frame(
+  H0 = "df=10",
+  H1 = rep(names(X_alts_stdt_10_fixed), 2),
+  Signifikansniveau = rep(c(alpha_true_5, alpha_true_10), each = 2),
+  
+  Z1_Teststyrke = c(
+    sapply(Z1_stdt_10_alt_fixed, function(z) Z_power(z, q_stdt_10_Z1_fixed[1])),
+    sapply(Z1_stdt_10_alt_fixed, function(z) Z_power(z, q_stdt_10_Z1_fixed[2]))
+  ),
+  Z2_Teststyrke = c(
+    sapply(Z2_stdt_10_alt_fixed, function(z) Z_power(z, q_stdt_10_Z2_fixed[1])),
+    sapply(Z2_stdt_10_alt_fixed, function(z) Z_power(z, q_stdt_10_Z2_fixed[2]))
+  ),
+  Z3_Teststyrke = c(
+    sapply(Z3_stdt_10_alt_fixed, function(z) Z_power(z, q_stdt_10_Z3_fixed[1])),
+    sapply(Z3_stdt_10_alt_fixed, function(z) Z_power(z, q_stdt_10_Z3_fixed[2]))
+  )
+)
+# printer powertabel
+ZPower_stdt_100_fixed
+ZPower_stdt_10_fixed
+```
+
+```{r}
+# Tilføjer igen beregning af power for VaR-overskridelsestest
+
+# Power under H0
+VaR1_stdt_100 <- -qt(0.01, df = 100) * sqrt(98/100)
+VaR1_stdt_10  <- -qt(0.01, df = 10) * sqrt(8/10)
+
+# Power under H1
+VaRpow_stdt100_5_fixed  <- VaR_power(X_stdt_fixed_5_shift100,  VaR1_stdt_100, c_5)
+VaRpow_stdt100_3_fixed  <- VaR_power(X_stdt_fixed_3_shift100,  VaR1_stdt_100, c_5)
+VaRpow_stdt100_10_fixed <- VaR_power(X_stdt_fixed_10_shift100, VaR1_stdt_100, c_5)  
+
+VaRpow_stdt100_5_10_fixed  <- VaR_power(X_stdt_fixed_5_shift100,  VaR1_stdt_100, c_10)
+VaRpow_stdt100_3_10_fixed  <- VaR_power(X_stdt_fixed_3_shift100,  VaR1_stdt_100, c_10)
+VaRpow_stdt100_10_10_fixed <- VaR_power(X_stdt_fixed_10_shift100, VaR1_stdt_100, c_10)
+
+VaRpow_stdt10_5_fixed   <- VaR_power(X_stdt_fixed_5_shift10, VaR1_stdt_10, c_5)
+VaRpow_stdt10_3_fixed   <- VaR_power(X_stdt_fixed_3_shift10, VaR1_stdt_10, c_5)
+
+VaRpow_stdt10_5_10_fixed <- VaR_power(X_stdt_fixed_5_shift10, VaR1_stdt_10, c_10)
+VaRpow_stdt10_3_10_fixed <- VaR_power(X_stdt_fixed_3_shift10, VaR1_stdt_10, c_10)
+
+# Tilføjer VaR til tabellen
+ZPower_stdt_100_fixed$VaR_1pct_power <- c(
+  c(VaRpow_stdt100_10_fixed, VaRpow_stdt100_5_fixed, VaRpow_stdt100_3_fixed),
+  c(VaRpow_stdt100_10_10_fixed, VaRpow_stdt100_5_10_fixed, VaRpow_stdt100_3_10_fixed)
+)
+
+ZPower_stdt_10_fixed$VaR_1pct_power <- c(
+  c(VaRpow_stdt10_5_fixed, VaRpow_stdt10_3_fixed),
+  c(VaRpow_stdt10_5_10_fixed, VaRpow_stdt10_3_10_fixed)
+)
+# printer tabel
+ZPower_stdt_100_fixed
+ZPower_stdt_10_fixed
+```
+
+
+```{r}
+# Samler tabellerne til én samlet, på samme måde som i Acerbi, og som i forrige dokument
+prep_power_table3 <- function(df, dist_label) {
+  df %>%
+    mutate(
+      Fordeling = dist_label,
+      nu_H0 = as.integer(str_extract(H0, "\\d+")),
+      nu_H1 = as.integer(str_extract(H1, "\\d+")),
+      `Signifikans-niveau (%)` = 100 * Signifikansniveau,
+      `Z1 (%)` = 100 * Z1_Teststyrke,
+      `Z2 (%)` = 100 * Z2_Teststyrke,
+      `Z3 (%)` = 100 * Z3_Teststyrke,
+      `VaR_1% (%)` = 100 * VaR_1pct_power
+    ) %>%
+    select(
+      Fordeling,
+      `Frihedsgrader H0` = nu_H0,
+      `Signifikans-niveau (%)`,
+      `Frihedsgrader H1` = nu_H1,
+      `Z1 (%)`, `Z2 (%)`, `Z3 (%)`, `VaR_1% (%)`
+    ) %>%
+    mutate(across(where(is.numeric), ~ round(.x, 1))) %>%
+    arrange(Fordeling, `Frihedsgrader H0`, `Signifikans-niveau (%)`, `Frihedsgrader H1`)
+}
+
+# samler tabellen med funktionen og power udregnet fra før
+table3_acerbi <- bind_rows(
+  prep_power_table3(ZPower_t_10_fixed,     "Student-t"),
+  prep_power_table3(ZPower_t_100_fixed,    "Student-t"),
+  prep_power_table3(ZPower_stdt_10_fixed,  "Standardiseret Student-t"),
+  prep_power_table3(ZPower_stdt_100_fixed, "Standardiseret Student-t")
+)
+
+# printer og gemmer
+table3_acerbi
+rownames(table3_acerbi) <- NULL
+h <- tableGrob(table3_acerbi, rows = NULL)
+# ggsave("table3_acerbi.pdf", plot = h, width = 10, height = 6)
+```

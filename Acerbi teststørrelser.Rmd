@@ -1,0 +1,131 @@
+---
+title: "Bachelor - Introduktion af Acerbi teststørrelser"
+output: pdf_document
+date: "2026-02-17"
+---
+# Dette dokument indlæser teststørrelser fra Acerbi med henblik på at genskabe artiklen senere
+# Er det 1. dokument i rækken
+
+```{r}
+# Introducerer pakker der enten bruges nu eller senere
+library(RwR) 
+library(knitr)
+library(gridExtra)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+```
+
+```{r}
+# Definerer Z1 fra Acerbi som bruges til replikation af Acerbi
+acerbi_Z1 <- function(X, VaR_value, ES) {
+  I <- (X + VaR_value) < 0
+  Nt <- rowSums(I)
+  Z1 <- rowSums(X * I / ES) / Nt + 1
+  na.omit(Z1)
+}
+```
+
+```{r}
+# Definerer Z2 fra Acerbi som bruges til replikation af Acerbi
+acerbi_Z2 <- function(X, VaR_value, ES, alpha) {
+  n <- ncol(X)
+  I <- (X + VaR_value) < 0
+  Z2 <- 1 / (n * alpha * ES) * rowSums(X * I) + 1
+  return(Z2)
+}
+```
+
+```{r}
+# Definerer Z3 fra Acerbi som bruges til replikation af Acerbi, kræver lidt forarbejde
+
+# beregner empirisk ES
+ES_hat <- function(U, df, alpha, tau = 1, mu = 0) {
+  n <- ncol(U)
+  cap <- floor(n * alpha)
+  
+  ES_observationer <- apply(U, 1, function(u) {
+    u_sorteret <- sort(u)
+    model_tab <- qt(u_sorteret[1:cap], df = df) * tau + mu # P^-1(U_t)
+  return(-mean(model_tab))})
+  return(ES_observationer)}
+
+Mm <- 10000
+nn <- 250
+
+# stor matrix, bruges til at approksimere forventet ES
+V_samples <- matrix(runif(Mm * nn), nrow = Mm, ncol = nn)
+
+# selve Z3 funktion
+acerbi_Z3 <- function(X, df_H0, alpha, tau = 1, mu = 0) {
+  U <- pt((X - mu) / tau, df = df_H0)
+  ES_Hat <- ES_hat(U, df = df_H0, alpha, tau, mu)
+  ES_V <- ES_hat(V_samples, df = df_H0, alpha, tau, mu)
+  
+  Z3 <- -ES_Hat / mean(ES_V) + 1
+  return(Z3)}
+```
+
+```{r}
+# simpel power-funktion der bruges i replikationen af tabellerne
+Z_power <- function(Z, q) { 1 - mean(Z >= q) }
+```
+
+# Denne kode hænger ikke rigtig sammen med replikationen af Acerbi, men bruges i introduktion til Student t-fordelinger
+```{r}
+# Plot af tæthedsfordelinger for udvalgte frihedsgrader til Student-t
+
+x <- seq(-6, 6, length.out = 1000)
+
+# Definerer plot
+df_plot <- data.frame(
+  x = rep(x, 6),
+  density = c(
+    dt(x, df = 100),
+    dt(x, df = 10),
+    dt(x, df = 5),
+    dt(x, df = 3),
+    dt(x, df = 2),
+    dnorm(x)
+  ),
+  frihedsgrader = factor(
+    rep(c("100", "10", "5", "3", "2", "Normal-fordeling"), each = length(x)),
+    levels = c("100", "10", "5", "3", "2", "Normal-fordeling")
+  )
+)
+
+# Plotter graf
+ggplot(df_plot, aes(x = x, y = density, color = frihedsgrader, linetype = frihedsgrader)) +
+  geom_line(size = 1) +
+  scale_color_manual(
+    values = c(
+      "100" = "red",
+      "10" = "purple",
+      "5" = "blue",
+      "3" = "darkgreen",
+      "2" = "orange",
+      "Normal-fordeling" = "black"
+    )
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "100" = "solid",
+      "10" = "solid",
+      "5" = "solid",
+      "3" = "solid",
+      "2" = "solid",
+      "Normal-fordeling" = "dashed"
+    )
+  ) +
+  guides(
+    color = guide_legend("Frihedsgrader"),
+    linetype = guide_legend("Frihedsgrader")
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  labs(x = "x", y = "tæthed")
+
+# gemmer plot
+ggsave("t_plot.pdf", plot = last_plot(), width = 8, height = 4)
+
+```

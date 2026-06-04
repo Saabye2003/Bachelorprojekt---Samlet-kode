@@ -1,0 +1,535 @@
+---
+title: "Bachelor - tabel 1+2 replikeret fra Acerbi"
+output: html_document
+date: "2026-02-19"
+---
+# Dette dokument bruges til at genskabe tabel 1+2 i artiklen fra Acerbi
+# Er det 2. dokument i rækken
+
+# har indset på et senere tidspunkt efter tabellerne faktisk er kørt, at jeg har simuleret for mange tilfælde når H0 er på 100 frihedsgrader
+# dette er blot blevet sorteret fra senere
+
+# Denne kode bruges til replikation af den øverste del af tabel 1 fra Acerbi
+```{r}
+# Sætter seed
+set.seed(10)
+
+# Definerer VaR til brug i Acerbi
+t_VaR <- function(alpha, df, tau = 1, mu = 0) {
+  q <- qt(alpha, df = df)
+  -(mu + tau * q)
+}
+
+# Definerer ES til brug i Acerbi
+t_ES <- function(alpha, df, tau = 1, mu = 0) {
+  q <- qt(alpha, df = df)
+  f <- dt(q, df = df)
+  ES_std <- (f * (df + q^2)) / ((df - 1) * alpha)
+  -mu + tau * ES_std
+}
+
+# Definerer parametre der både bruges nu og senere
+dfs <- c(5, 100)
+alpha_mærke <- c(0.025, 0.05, 0.10)   
+alpha_ES <- 0.025                     
+alpha_VaR <- 0.01                     
+n <- 250
+
+# Laver funktion til tabellen
+top_table1 <- do.call(rbind, lapply(dfs, function(df) {
+  VaR1_P <- t_VaR(alpha_VaR, df)
+  ES25_P <- t_ES(alpha_ES, df)
+
+  ES_ap_P <- sapply(alpha_mærke, function(ap) t_ES(ap, df))
+  gamma <- ES25_P / ES_ap_P
+
+  data.frame(
+    nu = df,
+    alpha_mærke_pct = 100 * alpha_mærke,
+    VaR_1pct = gamma * VaR1_P,
+    ES_2.5pct = gamma * ES25_P
+  )
+}))
+
+# Formaterer tabeller korrekt
+top_table1$VaR_1pct <- round(top_table1$VaR_1pct, 2)
+top_table1$ES_2.5pct <- round(top_table1$ES_2.5pct, 2)
+
+# Printer tabel
+# tabellen bruges ikke rigtig, men er meget god 'sanity-check'
+top_table1
+```
+
+```{r}
+# Afsnit bruges både til definitioner senere, samt VaR power funktionen
+
+n_VaR <- n          
+p_VaR <- 0.01
+
+# kritisk værdi
+tail_prob <- function(c) 1 - pbinom(c - 1, size = n_VaR, prob = p_VaR)
+
+c_grid <- 0:n_VaR
+tail_grid <- sapply(c_grid, tail_prob)
+
+c_5  <- c_grid[which.min(abs(tail_grid - 0.05))]
+c_10 <- c_grid[which.min(abs(tail_grid - 0.10))]
+
+alpha_true_5  <- tail_prob(c_5)
+alpha_true_10 <- tail_prob(c_10)
+
+# printer værdierne for at tjekke konsistens
+alpha_true_5
+alpha_true_10
+c_5
+c_10
+
+# Definerer VaR Power funktion
+VaR_power <- function(X, VaR1_model, c) {
+  Nexc <- rowSums(X < -VaR1_model)
+  mean(Nexc >= c)
+}
+```
+
+```{r}
+# Afsnit bruges til at replikere nederste del af tabel 1 i Acerbi
+
+# definerer variable der bruges nu
+alpha0_vec <- c(0.05, 0.10) 
+nu_vec <- c(5, 100)
+M <- 100000
+
+# Funktion der bruges senere til power for tabel 1
+table1_power_for_nu <- function(nu, n, M,
+                               alpha_ES,
+                               alpha0_vec,
+                               alpha_true_5, alpha_true_10,
+                               c_5, c_10) {
+
+# Model under H0
+  VaR25_model <- t_VaR(alpha_ES, nu)        
+  ES25_model  <- t_ES(alpha_ES, nu)         
+  VaR1_model  <- t_VaR(0.01, nu)            
+
+  X_H0 <- matrix(rt(n * M, df = nu), nrow = M, ncol = n)
+
+  Z2_null <- acerbi_Z2(X_H0, VaR25_model, ES25_model, alpha_ES)
+  Z3_null <- acerbi_Z3(X_H0, df_H0 = nu, alpha = alpha_ES, tau = 1, mu = 0)
+
+  qZ2 <- quantile(Z2_null, probs = c(alpha_true_5, alpha_true_10))
+  qZ3 <- quantile(Z3_null, probs = c(alpha_true_5, alpha_true_10))
+
+# Loop der bruges til H1
+  out <- list()
+
+  for (alpha0 in alpha0_vec) {
+# Skalerer fordelingen
+    ES_a0 <- t_ES(alpha0, nu)
+    gamma <- ES25_model / ES_a0
+
+# Model under H1
+    X_H1 <- gamma * matrix(rt(n * M, df = nu), nrow = M, ncol = n)
+
+    Z2_alt <- acerbi_Z2(X_H1, VaR25_model, ES25_model, alpha_ES)
+    Z3_alt <- acerbi_Z3(X_H1, df_H0 = nu, alpha = alpha_ES, tau = 1, mu = 0)
+
+# Power ved to signifikansniveauer for tre teststørrelser
+    pow_Z2_5  <- Z_power(Z2_alt, qZ2[1])
+    pow_Z2_10 <- Z_power(Z2_alt, qZ2[2])
+
+    pow_Z3_5  <- Z_power(Z3_alt, qZ3[1])
+    pow_Z3_10 <- Z_power(Z3_alt, qZ3[2])
+
+    pow_VaR_5  <- VaR_power(X_H1, VaR1_model, c_5)
+    pow_VaR_10 <- VaR_power(X_H1, VaR1_model, c_10)
+
+# Gemmer to rækker: én for ~5%, én for ~10%
+    out[[paste0("nu", nu, "_a0", alpha0, "_5")]] <- data.frame(
+      nu = nu,
+      Significance_level_pct = 100 * alpha_true_5,
+      Coverage_alpha0_pct = 100 * alpha0,
+      Scale_gamma_pct = 100 * (gamma - 1),
+      Z2_power_pct = 100 * pow_Z2_5,
+      Z3_power_pct = 100 * pow_Z3_5,
+      VaR1_power_pct = 100 * pow_VaR_5
+    )
+
+    out[[paste0("nu", nu, "_a0", alpha0, "_10")]] <- data.frame(
+      nu = nu,
+      Significance_level_pct = 100 * alpha_true_10,
+      Coverage_alpha0_pct = 100 * alpha0,
+      Scale_gamma_pct = 100 * (gamma - 1),
+      Z2_power_pct = 100 * pow_Z2_10,
+      Z3_power_pct = 100 * pow_Z3_10,
+      VaR1_power_pct = 100 * pow_VaR_10
+    )
+  }
+
+  do.call(rbind, out)
+}
+
+# Beregner nu nederste del af tabel 1, med power funktionen for tabel 1
+table1_bottom <- do.call(rbind, lapply(nu_vec, function(nu) {
+  table1_power_for_nu(
+    nu = nu, n = n, M = M,
+    alpha_ES = alpha_ES,
+    alpha0_vec = alpha0_vec,
+    alpha_true_5 = alpha_true_5, alpha_true_10 = alpha_true_10,
+    c_5 = c_5, c_10 = c_10
+  )
+}))
+
+# Laver format som i Acerbi
+table1_bottom$Significance_level_pct <- round(table1_bottom$Significance_level_pct, 1)
+table1_bottom$Coverage_alpha0_pct    <- round(table1_bottom$Coverage_alpha0_pct, 0)
+table1_bottom$Scale_gamma_pct        <- round(table1_bottom$Scale_gamma_pct, 1)
+table1_bottom$Z2_power_pct           <- round(table1_bottom$Z2_power_pct, 1)
+table1_bottom$Z3_power_pct           <- round(table1_bottom$Z3_power_pct, 1)
+table1_bottom$VaR1_power_pct         <- round(table1_bottom$VaR1_power_pct, 1)
+
+# Printer og gemmer tabel 1
+rownames(table1_bottom) <- NULL
+
+# Omdøber kolonner til visning med % i stedet for pct
+colnames(table1_bottom) <- c(
+  "Frihedsgrader",
+  "Signifikans-niveau (%)",
+  "alpha-dækning (%)",
+  "Skaleret gamma (%)",
+  "Z2 (%)",
+  "Z3 (%)",
+  "VaR_1% (%)"
+)
+
+table1_bottom
+g <- tableGrob(table1_bottom, rows = NULL)
+g
+
+# ggsave("table1.pdf", plot = g, width = 15, height = 4)
+```
+
+# Herfra er indhold til Acerbi tabel 2, med undtagelse af simulering af afkast til tabel 3:
+```{r}
+# Definitioner af frihedsgrader, tau, VaR og ES der bruges til tabel 2, og til dels også tabel 3
+alpha <- 0.025
+  
+df_10 <- 10
+df_100 <- 100
+  
+tau_10 <- sqrt((df_10 - 2) / df_10)
+tau_100 <- sqrt((df_100 - 2) / df_100)
+  
+VaR_t_10  <- -qt(alpha, df = df_10)
+VaR_t_100 <- -qt(alpha, df = df_100)
+  
+VaR_stdt_10  <- -qt(alpha, df = df_10) * tau_10
+VaR_stdt_100 <- -qt(alpha, df = df_100) * tau_100
+  
+ES_t_10 <- (df_10 + qt(alpha, df_10)^2) / (df_10 - 1) * dt(qt(alpha, df_10), df_10) / alpha
+ES_stdt_10 <- tau_10 * ES_t_10
+  
+ES_t_100 <- (df_100 + qt(alpha, df_100)^2) / (df_100 - 1) * dt(qt(alpha, df_100), df_100) / alpha
+ES_stdt_100 <- tau_100 * ES_t_100
+
+```
+
+```{r}
+# Simulerer afkast for både tabel 2 og 3 fra Acerbi
+
+# Sætter seed igen, da især arbejdet her taget tid, og skal kunne replikeres
+set.seed(10)
+
+# Dette bruges til tabel 2
+X_t_100 <- matrix(rt(n * M, df = 100), nrow = M, ncol = n)
+X_t_10 <- matrix(rt(n * M, df = 10), nrow = M, ncol = n)
+X_t_5 <- matrix(rt(n * M, df = 5), nrow = M, ncol = n)
+X_t_3 <- matrix(rt(n * M, df = 3), nrow = M, ncol = n)
+
+# Gentages for std. t-fordelt
+X_stdt_100 <- matrix(rt(n * M, df = 100), nrow = M, ncol = n) * sqrt(98/100)
+X_stdt_10 <- matrix(rt(n * M, df = 10), nrow = M, ncol = n) * sqrt(8/10)
+X_stdt_5 <- matrix(rt(n * M, df = 5), nrow = M, ncol = n) * sqrt(3/5)
+X_stdt_3 <- matrix(rt(n * M, df = 3), nrow = M, ncol = n) * sqrt(1/3)
+
+
+# Herfra bruges til tabel 3, hvor VaR holdes fast, derfor kræver det shift/skalering
+VaR_2.5_100 <- qt(0.025, df = 100)
+VaR_2.5_10 <- qt(0.025, df = 10)
+VaR_2.5_5 <- qt(0.025, df = 5)
+VaR_2.5_3 <- qt(0.025, df = 3)
+
+required_shift_10_5 <- VaR_2.5_10 - VaR_2.5_5
+required_shift_10_3 <- VaR_2.5_10 - VaR_2.5_3
+
+required_shift_100_10 <- VaR_2.5_100 - VaR_2.5_10
+required_shift_100_5 <- VaR_2.5_100 - VaR_2.5_5
+required_shift_100_3 <- VaR_2.5_100 - VaR_2.5_3
+
+X_t_fixed_10_shift100 <- matrix(rt(n * M, df = 10), nrow = M, ncol = n) + required_shift_100_10
+X_t_fixed_5_shift100 <- matrix(rt(n * M, df = 5), nrow = M, ncol = n) + required_shift_100_5
+X_t_fixed_3_shift100 <- matrix(rt(n * M, df = 3), nrow = M, ncol = n) + required_shift_100_3
+X_t_fixed_5_shift10 <- matrix(rt(n * M, df = 5), nrow = M, ncol = n) + required_shift_10_5
+X_t_fixed_3_shift10 <- matrix(rt(n * M, df = 3), nrow = M, ncol = n) + required_shift_10_3
+
+# Gentages for std. t-fordelt
+VaR_2.5_100_std <- qt(0.025, df = 100) * sqrt(98/100)
+VaR_2.5_10_std <- qt(0.025, df = 10) * sqrt(8/10)
+VaR_2.5_5_std <- qt(0.025, df = 5) * sqrt(3/5)
+VaR_2.5_3_std <- qt(0.025, df = 3) * sqrt(1/3)
+
+required_shift_10_5_std <- VaR_2.5_10_std - VaR_2.5_5_std
+required_shift_10_3_std <- VaR_2.5_10_std - VaR_2.5_3_std
+
+required_shift_100_10_std <- VaR_2.5_100_std - VaR_2.5_10_std
+required_shift_100_5_std <- VaR_2.5_100_std - VaR_2.5_5_std
+required_shift_100_3_std <- VaR_2.5_100_std - VaR_2.5_3_std
+
+X_stdt_fixed_10_shift100 <- matrix(rt(n * M, df = 10), nrow = M, ncol = n) * sqrt(8/10) + required_shift_100_10_std
+X_stdt_fixed_5_shift100 <- matrix(rt(n * M, df = 5), nrow = M, ncol = n) * sqrt(3/5) + required_shift_100_5_std
+X_stdt_fixed_3_shift100 <- matrix(rt(n * M, df = 3), nrow = M, ncol = n) * sqrt(1/3) + required_shift_100_3_std
+X_stdt_fixed_5_shift10 <- matrix(rt(n * M, df = 5), nrow = M, ncol = n) * sqrt(3/5) + required_shift_10_5_std
+X_stdt_fixed_3_shift10 <- matrix(rt(n * M, df = 3), nrow = M, ncol = n) * sqrt(1/3) + required_shift_10_3_std
+```
+
+
+# Herfra og ned er til tabel 2
+
+# starter med "alm" Student t-fordelt, bagefter std. Student t-fordelt
+```{r}
+# H0 og H1 fordeling for Z2
+X_alts_t_100 <- list(df10 = X_t_10, df5 = X_t_5, df3 = X_t_3)
+X_alts_t_10  <- list(df5 = X_t_5, df3 = X_t_3)
+
+Z2_t_100_null <- acerbi_Z2(X_t_100, VaR_t_100, ES_t_100, alpha)
+Z2_t_10_null  <- acerbi_Z2(X_t_10,  VaR_t_10,  ES_t_10,  alpha)
+
+Z2_t_100_alt <- lapply(X_alts_t_100, function(x) acerbi_Z2(x, VaR_t_100, ES_t_100, alpha))
+Z2_t_10_alt  <- lapply(X_alts_t_10,  function(x) acerbi_Z2(x, VaR_t_10,  ES_t_10,  alpha))
+
+q_t_100_Z2 <- quantile(Z2_t_100_null, probs = c(alpha_true_5, alpha_true_10))
+q_t_10_Z2  <- quantile(Z2_t_10_null,  probs = c(alpha_true_5, alpha_true_10))
+```
+
+```{r}
+# H0 og H1 fordeling for Z3
+Z3_t_100_null <- acerbi_Z3(X_t_100, df_H0 = 100, alpha, tau = 1)
+Z3_t_10_null  <- acerbi_Z3(X_t_10, df_H0 = 10, alpha, tau = 1)
+
+Z3_t_100_alt <- lapply(X_alts_t_100, function(x) acerbi_Z3(x, df_H0 = 100, alpha, tau = 1, mu = 0))
+Z3_t_10_alt  <- lapply(X_alts_t_10,  function(x) acerbi_Z3(x, df_H0 = 10, alpha, tau = 1, mu = 0))
+
+q_t_100_Z3 <- quantile(Z3_t_100_null, probs = c(alpha_true_5, alpha_true_10))
+q_t_10_Z3  <- quantile(Z3_t_10_null,  probs = c(alpha_true_5, alpha_true_10))
+```
+
+```{r}
+# Power for Z2 og Z3 for begge frihedsgrader for H0, og de 3 og 2 frihedsgrader for H1
+# 100 frihedsgrader
+ZPower_t_100 <- data.frame(
+  H0 = "df=100",
+  H1 = rep(names(X_alts_t_100), 2),
+  Signifikansniveau = rep(c(alpha_true_5, alpha_true_10), each = 3),
+  Z2_Teststyrke = c(
+    sapply(Z2_t_100_alt, function(z) Z_power(z, q_t_100_Z2[1])),
+    sapply(Z2_t_100_alt, function(z) Z_power(z, q_t_100_Z2[2]))
+  ),
+  Z3_Teststyrke = c(
+    sapply(Z3_t_100_alt, function(z) Z_power(z, q_t_100_Z3[1])),
+    sapply(Z3_t_100_alt, function(z) Z_power(z, q_t_100_Z3[2]))
+  )
+)
+# 10 frihedsgrader
+ZPower_t_10 <- data.frame(
+  H0 = "df=10",
+  H1 = rep(names(X_alts_t_10), 2),
+  Signifikansniveau = rep(c(alpha_true_5, alpha_true_10), each = 2),
+  Z2_Teststyrke = c(
+    sapply(Z2_t_10_alt, function(z) Z_power(z, q_t_10_Z2[1])),
+    sapply(Z2_t_10_alt, function(z) Z_power(z, q_t_10_Z2[2]))
+  ),
+  Z3_Teststyrke = c(
+    sapply(Z3_t_10_alt, function(z) Z_power(z, q_t_10_Z3[1])),
+    sapply(Z3_t_10_alt, function(z) Z_power(z, q_t_10_Z3[2]))
+  )
+)
+# printer tabel med power, men gør ikke mere ved den nu, venter til std. t-fordelt også er lavet
+ZPower_t_100
+ZPower_t_10
+```
+
+```{r}
+# Tilføjer nu power ved VaR-overskridelsestesten
+
+#H0 model
+VaR1_t_100 <- -qt(0.01, df = 100)
+VaR1_t_10  <- -qt(0.01, df = 10)
+
+# Power under H1
+VaRpow_t100_5  <- VaR_power(X_t_5,  VaR1_t_100, c_5)
+VaRpow_t100_3  <- VaR_power(X_t_3,  VaR1_t_100, c_5)
+VaRpow_t100_10 <- VaR_power(X_t_10, VaR1_t_100, c_5) 
+
+VaRpow_t100_5_10  <- VaR_power(X_t_5,  VaR1_t_100, c_10)
+VaRpow_t100_3_10  <- VaR_power(X_t_3,  VaR1_t_100, c_10)
+VaRpow_t100_10_10 <- VaR_power(X_t_10, VaR1_t_100, c_10)
+
+VaRpow_t10_5   <- VaR_power(X_t_5, VaR1_t_10, c_5)
+VaRpow_t10_3   <- VaR_power(X_t_3, VaR1_t_10, c_5)
+
+VaRpow_t10_5_10 <- VaR_power(X_t_5, VaR1_t_10, c_10)
+VaRpow_t10_3_10 <- VaR_power(X_t_3, VaR1_t_10, c_10)
+
+# Udregner power og tilføjer til tabel
+ZPower_t_100$VaR_1pct_power <- c(
+  c(VaRpow_t100_10, VaRpow_t100_5, VaRpow_t100_3),
+  c(VaRpow_t100_10_10, VaRpow_t100_5_10, VaRpow_t100_3_10)
+)
+
+ZPower_t_10$VaR_1pct_power <- c(
+  c(VaRpow_t10_5, VaRpow_t10_3),
+  c(VaRpow_t10_5_10, VaRpow_t10_3_10)
+)
+
+# printer samlet tabel
+ZPower_t_100
+ZPower_t_10
+```
+# Herfra og ned er til normaliseret student t-fordeling, men proceduren er præcis den samme som forrige segment
+```{r}
+# H0 og H1 fordeling for Z2
+X_alts_stdt_100 <- list(df10 = X_stdt_10, df5 = X_stdt_5, df3 = X_stdt_3)
+X_alts_stdt_10  <- list(df5 = X_stdt_5, df3 = X_stdt_3)
+
+Z2_stdt_100_null <- acerbi_Z2(X_stdt_100, VaR_stdt_100, ES_stdt_100, alpha)
+Z2_stdt_10_null  <- acerbi_Z2(X_stdt_10,  VaR_stdt_10,  ES_stdt_10,  alpha)
+
+Z2_stdt_100_alt <- lapply(X_alts_stdt_100, function(x) acerbi_Z2(x, VaR_stdt_100, ES_stdt_100, alpha))
+Z2_stdt_10_alt  <- lapply(X_alts_stdt_10,  function(x) acerbi_Z2(x, VaR_stdt_10,  ES_stdt_10,  alpha))
+
+q_stdt_100_Z2 <- quantile(Z2_stdt_100_null, probs = c(alpha_true_5, alpha_true_10))
+q_stdt_10_Z2  <- quantile(Z2_stdt_10_null,  probs = c(alpha_true_5, alpha_true_10))
+```
+
+```{r}
+# H0 og H1 fordeling for Z3
+Z3_stdt_100_null <- acerbi_Z3(X_stdt_100, df_H0 = 100, alpha, tau = 1)
+Z3_stdt_10_null  <- acerbi_Z3(X_stdt_10, df_H0 = 10, alpha, tau = 1)
+
+Z3_stdt_100_alt <- lapply(X_alts_stdt_100, function(x) acerbi_Z3(x, df_H0 = 100, alpha, tau = 1, mu = 0))
+Z3_stdt_10_alt  <- lapply(X_alts_stdt_10,  function(x) acerbi_Z3(x, df_H0 = 10, alpha, tau = 1, mu = 0))
+
+q_stdt_100_Z3 <- quantile(Z3_stdt_100_null, probs = c(alpha_true_5, alpha_true_10))
+q_stdt_10_Z3  <- quantile(Z3_stdt_10_null,  probs = c(alpha_true_5, alpha_true_10))
+```
+
+```{r}
+# Power for både Z2 og Z3 under forskellige scenarier
+# for 100 frihedsgrader H0
+ZPower_stdt_100 <- data.frame(
+  H0 = "df=100",
+  H1 = rep(names(X_alts_stdt_100), 2),
+  Signifikansniveau = rep(c(alpha_true_5, alpha_true_10), each = 3),
+  Z2_Teststyrke = c(
+    sapply(Z2_stdt_100_alt, function(z) Z_power(z, q_stdt_100_Z2[1])),
+    sapply(Z2_stdt_100_alt, function(z) Z_power(z, q_stdt_100_Z2[2]))
+  ),
+  Z3_Teststyrke = c(
+    sapply(Z3_stdt_100_alt, function(z) Z_power(z, q_stdt_100_Z3[1])),
+    sapply(Z3_stdt_100_alt, function(z) Z_power(z, q_stdt_100_Z3[2]))
+  )
+)
+# for 10 frihedsgrader H0
+ZPower_stdt_10 <- data.frame(
+  H0 = "df=10",
+  H1 = rep(names(X_alts_stdt_10), 2),
+  Signifikansniveau = rep(c(alpha_true_5, alpha_true_10), each = 2),
+  Z2_Teststyrke = c(
+    sapply(Z2_stdt_10_alt, function(z) Z_power(z, q_stdt_10_Z2[1])),
+    sapply(Z2_stdt_10_alt, function(z) Z_power(z, q_stdt_10_Z2[2]))
+  ),
+  Z3_Teststyrke = c(
+    sapply(Z3_stdt_10_alt, function(z) Z_power(z, q_stdt_10_Z3[1])),
+    sapply(Z3_stdt_10_alt, function(z) Z_power(z, q_stdt_10_Z3[2]))
+  )
+)
+# printer tabel, dog uden VaR
+ZPower_stdt_100
+ZPower_stdt_10
+```
+
+```{r}
+# Power for VaR-overskridelsestest på samme måde
+
+# H0
+VaR1_stdt_100 <- -qt(0.01, df = 100)*sqrt(98/100)
+VaR1_stdt_10  <- -qt(0.01, df = 10)*sqrt(8/10)
+
+# H1
+VaRpow_stdt100_5  <- VaR_power(X_stdt_5,  VaR1_stdt_100, c_5)
+VaRpow_stdt100_3  <- VaR_power(X_stdt_3,  VaR1_stdt_100, c_5)
+VaRpow_stdt100_10 <- VaR_power(X_stdt_10, VaR1_stdt_100, c_5) 
+
+VaRpow_stdt100_5_10  <- VaR_power(X_stdt_5,  VaR1_stdt_100, c_10)
+VaRpow_stdt100_3_10  <- VaR_power(X_stdt_3,  VaR1_stdt_100, c_10)
+VaRpow_stdt100_10_10 <- VaR_power(X_stdt_10, VaR1_stdt_100, c_10)
+
+VaRpow_stdt10_5   <- VaR_power(X_stdt_5, VaR1_stdt_10, c_5)
+VaRpow_stdt10_3   <- VaR_power(X_stdt_3, VaR1_stdt_10, c_5)
+
+VaRpow_stdt10_5_10 <- VaR_power(X_stdt_5, VaR1_stdt_10, c_10)
+VaRpow_stdt10_3_10 <- VaR_power(X_stdt_3, VaR1_stdt_10, c_10)
+
+# Tilføjer VaR til tabellen
+ZPower_stdt_100$VaR_1pct_power <- c(
+  c(VaRpow_stdt100_10, VaRpow_stdt100_5, VaRpow_stdt100_3),
+  c(VaRpow_stdt100_10_10, VaRpow_stdt100_5_10, VaRpow_stdt100_3_10)
+)
+
+ZPower_stdt_10$VaR_1pct_power <- c(
+  c(VaRpow_stdt10_5, VaRpow_stdt10_3),
+  c(VaRpow_stdt10_5_10, VaRpow_stdt10_3_10)
+)
+
+# printer
+ZPower_stdt_100
+ZPower_stdt_10
+```
+
+# Samler nu de to dele til én samlet tabel, præcis som i Acerbi
+```{r}
+# laver én samlet funktion til begge tabeller samlet, som én lang, på samme måde som i Acerbi
+prep_power_table <- function(df, dist_label) {
+  df %>%
+    mutate(
+      Fordeling = dist_label,
+      nu_H0 = as.integer(str_extract(H0, "\\d+")),
+      nu_H1 = as.integer(str_extract(H1, "\\d+")),
+      `Signifikans-niveau (%)` = 100 * Signifikansniveau,
+      `Z2 (%)` = 100 * Z2_Teststyrke,
+      `Z3 (%)` = 100 * Z3_Teststyrke,
+      `VaR_1% (%)` = 100 * VaR_1pct_power
+    ) %>%
+    select(
+      Fordeling,
+      `Frihedsgrader H0` = nu_H0,
+      `Signifikans-niveau (%)`,
+      `Frihedsgrader H1` = nu_H1,
+      `Z2 (%)`, `Z3 (%)`, `VaR_1% (%)`
+    ) %>%
+    mutate(across(where(is.numeric), ~ round(.x, 1))) %>%
+    arrange(Fordeling, `Frihedsgrader H0`, `Signifikans-niveau (%)`, `Frihedsgrader H1`)
+}
+
+# samler tabellen med funktionen, og power udregnet førhen, printer og gemmer
+table2_acerbi <- bind_rows(
+  prep_power_table(ZPower_t_10,     "Student-t"),
+  prep_power_table(ZPower_t_100,    "Student-t"),
+  prep_power_table(ZPower_stdt_10,  "Standardiseret Student-t"),
+  prep_power_table(ZPower_stdt_100, "Standardiseret Student-t")
+)
+table2_acerbi
+rownames(table2_acerbi) <- NULL
+s <- tableGrob(table2_acerbi, rows = NULL)
+
+# ggsave("table2_acerbi.pdf", plot = s, width = 10, height = 6)
+```
